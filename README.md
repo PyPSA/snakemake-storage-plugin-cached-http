@@ -3,9 +3,11 @@ SPDX-FileCopyrightText: Contributors to PyPSA-Eur <https://github.com/pypsa/pyps
 SPDX-License-Identifier: CC-BY-4.0
 -->
 
-# Snakemake Storage Plugin: Zenodo
+# Snakemake Storage Plugin: Cached HTTP
 
-A Snakemake storage plugin for downloading files from Zenodo with local caching, checksum verification, and adaptive rate limiting.
+A Snakemake storage plugin for downloading files via HTTP with local caching, checksum verification, and adaptive rate limiting.
+
+**Note:** This plugin is currently specifically designed for zenodo.org URLs.
 
 ## Features
 
@@ -22,7 +24,7 @@ A Snakemake storage plugin for downloading files from Zenodo with local caching,
 From the pypsa-eur repository root:
 
 ```bash
-pip install -e plugins/snakemake-storage-plugin-zenodo
+pip install -e plugins/snakemake-storage-plugin-cached-http
 ```
 
 ## Configuration
@@ -32,10 +34,10 @@ The Zenodo storage plugin works alongside other storage providers (like HTTP). S
 Register additional settings in your Snakefile if you want to customize the defaults:
 
 ```python
-# Optional: Configure Zenodo storage with custom settings
+# Optional: Configure cached HTTP storage with custom settings
 # This extends the existing storage configuration (e.g., for HTTP)
-storage zenodo:
-    provider="zenodo",
+storage cached_http:
+    provider="cached-http",
     cache="~/.cache/snakemake-pypsa-eur",  # Default location
     max_concurrent_downloads=3,  # Download max 3 files at once
 ```
@@ -48,16 +50,16 @@ If you don't explicitly configure it, the plugin will use default settings autom
   - Default: Platform-dependent user cache directory (via `platformdirs.user_cache_dir("snakemake-pypsa-eur")`)
   - Set to `""` (empty string) to disable caching
   - Files are cached here to avoid re-downloading
-  - Environment variable: `SNAKEMAKE_STORAGE_ZENODO_CACHE`
+  - Environment variable: `SNAKEMAKE_STORAGE_CACHED_HTTP_CACHE`
 
-- **skip_remote_checks** (optional): Skip metadata checking with Zenodo API
+- **skip_remote_checks** (optional): Skip metadata checking with remote API
   - Default: `False` (perform checks)
   - Set to `True` or `"1"` to skip remote existence/size checks (useful for CI/CD)
-  - Environment variable: `SNAKEMAKE_STORAGE_ZENODO_SKIP_REMOTE_CHECKS`
+  - Environment variable: `SNAKEMAKE_STORAGE_CACHED_HTTP_SKIP_REMOTE_CHECKS`
 
 - **max_concurrent_downloads** (optional): Maximum concurrent downloads
   - Default: `3`
-  - Controls how many Zenodo files can be downloaded simultaneously
+  - Controls how many files can be downloaded simultaneously
   - No environment variable support
 
 ## Usage
@@ -79,7 +81,7 @@ Or if you configured a tagged storage entity:
 ```python
 rule download_data:
     input:
-        storage.zenodo(
+        storage.cached_http(
             "https://zenodo.org/records/3520874/files/natura.tiff"
         ),
     output:
@@ -106,8 +108,8 @@ For continuous integration environments where you want to skip caching and remot
 # GitHub Actions example
 - name: Run snakemake workflows
   env:
-    SNAKEMAKE_STORAGE_ZENODO_CACHE: ""
-    SNAKEMAKE_STORAGE_ZENODO_SKIP_REMOTE_CHECKS: "1"
+    SNAKEMAKE_STORAGE_CACHED_HTTP_CACHE: ""
+    SNAKEMAKE_STORAGE_CACHED_HTTP_SKIP_REMOTE_CHECKS: "1"
   run: |
     snakemake --cores all
 ```
@@ -134,11 +136,11 @@ The plugin automatically:
 ### Plugin Priority
 
 When using `storage()` without specifying a plugin name, Snakemake checks all installed plugins:
-- **Zenodo plugin**: Only accepts zenodo.org URLs (`is_valid_query` returns True only for zenodo.org)
+- **Cached HTTP plugin**: Only accepts zenodo.org URLs (`is_valid_query` returns True only for zenodo.org)
 - **HTTP plugin**: Accepts all HTTP/HTTPS URLs (including zenodo.org)
 
 If both plugins are installed, zenodo.org URLs are ambiguous - both plugins accept them.
-Typically snakemake would raise an error: **"Multiple suitable storage providers found"** if you try to use `storage()` without specifying which plugin to use, ie. one needs to explicitly call the Zenodo provider for zenodo.org URLs using `storage.zenodo(url)` instead of `storage(url)`,
+Typically snakemake would raise an error: **"Multiple suitable storage providers found"** if you try to use `storage()` without specifying which plugin to use, ie. one needs to explicitly call the Cached HTTP provider for zenodo.org URLs using `storage.cached_http(url)` instead of `storage(url)`,
 but we monkey-patch the http plugin to refuse zenodo.org urls.
 
 ## License

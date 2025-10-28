@@ -68,7 +68,7 @@ orig_valid_query = http_base.StorageProvider.is_valid_query
 http_base.StorageProvider.is_valid_query = classmethod(
     lambda c, q: (
         StorageQueryValidationResult(
-            query=q, valid=False, reason="Deactivated in favour of zenodo"
+            query=q, valid=False, reason="Deactivated in favour of cached_http"
         )
         if is_zenodo_url(q)
         else orig_valid_query(q)
@@ -86,21 +86,21 @@ class StorageProviderSettings(SettingsBase):
             "snakemake-pypsa-eur", ensure_exists=False
         ),
         metadata={
-            "help": 'Cache directory for downloaded Zenodo files (default: platform-dependent user cache dir). Set to "" to deactivate caching.',
+            "help": 'Cache directory for downloaded files (default: platform-dependent user cache dir). Set to "" to deactivate caching.',
             "env_var": True,
         },
     )
     skip_remote_checks: bool = field(
         default=False,
         metadata={
-            "help": "Whether to skip metadata checking with zenodo (default: False, ie. do check).",
+            "help": "Whether to skip metadata checking with remote server (default: False, ie. do check).",
             "env_var": True,
         },
     )
     max_concurrent_downloads: int | None = field(
         default=3,
         metadata={
-            "help": "Maximum number of concurrent Zenodo downloads.",
+            "help": "Maximum number of concurrent downloads.",
             "env_var": False,
         },
     )
@@ -152,7 +152,7 @@ class StorageProvider(StorageProviderBase):
         self._client: httpx.AsyncClient | None = None
         self._client_refcount: int = 0
 
-        # Cache for Zenodo record metadata to avoid repeated API calls
+        # Cache for record metadata to avoid repeated API calls
         self._record_cache: dict[str, dict[str, ZenodoFileMetadata]] = {}
 
     def use_rate_limiter(self) -> bool:
@@ -171,7 +171,7 @@ class StorageProvider(StorageProviderBase):
         return [
             ExampleQuery(
                 query="https://zenodo.org/records/17249457/files/ARDECO-SNPTD.2021.table.csv",
-                description="A zenodo file URL",
+                description="A Zenodo file URL (currently the only supported HTTP source)",
                 type=QueryType.INPUT,
             )
         ]
