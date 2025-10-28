@@ -19,7 +19,7 @@ dependencies = [
     "snakemake-interface-common ~= 1.14",
     "snakemake-interface-storage-plugins >=4.2,<5.0",
     "snakemake-storage-plugin-http ~= 0.3",
-    "tqdm-loggable>=0.2",
+    "tqdm-loggable ~= 0.2",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -30,9 +30,6 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
 ]
-
-[tool.pyright]
-typeCheckingMode = "off"
 
 [project.urls]
 homepage = "https://github.com/pypsa/pypsa-eur"
