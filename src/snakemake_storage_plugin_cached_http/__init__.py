@@ -455,12 +455,13 @@ class StorageObject(StorageObjectRead):
 
         digest, checksum_expected = checksum.split(":", maxsplit=1)
 
-        # Compute checksum asynchronously (hashlib releases GIL)
-        def compute_hash(digest: str = digest):
+        def compute_hash(path: Path = path, digest: str = digest):
             with open(path, "rb") as f:
                 return hashlib.file_digest(f, digest).hexdigest().lower()
 
-        checksum_observed = await asyncio.to_thread(compute_hash)
+        # Compute checksum asynchronously (hashlib releases GIL)
+        # checksum_observed = await asyncio.to_thread(compute_hash)
+        checksum_observed = compute_hash(path, digest)
 
         if checksum_expected != checksum_observed:
             raise WrongChecksum(observed=checksum_observed, expected=checksum_expected)
