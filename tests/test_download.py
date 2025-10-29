@@ -139,8 +139,10 @@ async def test_cache_functionality(storage_provider, tmp_path):
     await obj1.managed_retrieve()
 
     # Verify cache was populated
-    assert obj1.query_path is not None
-    assert obj1.query_path.exists()
+    assert obj1.provider.cache is not None
+    cached_path = obj1.provider.cache.get(str(obj1.query))
+    assert cached_path is not None
+    assert cached_path.exists()
 
     # Second download should use cache
     obj2 = StorageObject(

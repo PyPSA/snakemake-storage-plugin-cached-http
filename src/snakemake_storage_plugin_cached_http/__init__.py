@@ -11,7 +11,7 @@ import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import override
+from typing_extensions import override
 from urllib.parse import urlparse
 
 import httpx

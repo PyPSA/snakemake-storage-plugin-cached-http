@@ -21,6 +21,7 @@ dependencies = [
     "snakemake-interface-storage-plugins >=4.2,<5.0",
     "snakemake-storage-plugin-http ~= 0.3",
     "tqdm-loggable ~= 0.2",
+    "typing-extensions ~= 4.15",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
