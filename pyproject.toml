@@ -65,3 +65,10 @@ dev = [
     "pytest-asyncio>=1.2.0",
     "snakemake>=9.13.4",
 ]
+
+[tool.basedpyright]
+reportImplicitStringConcatenation = false
+ignore = ["tests", "src/snakemake_storage_plugin_cached_http/monkeypatch.py"]
+reportUnusedCallResult = false
+reportAny = false
+reportMissingTypeStubs = false

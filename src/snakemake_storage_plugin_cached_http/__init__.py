@@ -5,19 +5,18 @@
 import asyncio
 import hashlib
 import json
+from logging import Logger
 import shutil
 import time
-from collections.abc import Iterable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import override
 from urllib.parse import urlparse
 
 import httpx
 import platformdirs
-import snakemake_storage_plugin_http as http_base
-from reretry import retry
+from reretry import retry  # pyright: ignore[reportUnknownVariableType]
 from snakemake_interface_common.exceptions import WorkflowError
 from snakemake_interface_common.logging import get_logger
 from snakemake_interface_common.plugin_registry.plugin import SettingsBase
@@ -32,16 +31,21 @@ from snakemake_interface_storage_plugins.storage_provider import (
 )
 from tqdm_loggable.auto import tqdm
 
+from .cache import Cache
+from .monkeypatch import is_zenodo_url  # noqa: F401 - applies monkeypatch on import
+
 logger = get_logger()
 
 
 class ReretryLoggerAdapter:
     """Adapter to make Snakemake's logger compatible with reretry's logging expectations."""
 
-    def __init__(self, snakemake_logger):
+    _logger: Logger
+
+    def __init__(self, snakemake_logger: Logger):
         self._logger = snakemake_logger
 
-    def warning(self, msg, *args, **kwargs):
+    def warning(self, msg: str, *args, **kwargs):  # pyright: ignore[reportUnknownParameterType, reportUnusedParameter, reportMissingParameterType]
         """
         Format message manually before passing to Snakemake logger.
 
@@ -53,27 +57,6 @@ class ReretryLoggerAdapter:
             # Pre-format the message with % operator
             msg = msg % args
         self._logger.warning(msg)
-
-
-def is_zenodo_url(url):
-    parsed = urlparse(url)
-    return parsed.netloc in ("zenodo.org", "sandbox.zenodo.org") and parsed.scheme in (
-        "http",
-        "https",
-    )
-
-
-# Patch the original HTTP StorageProvider off zenodo urls, so that there is no conflict
-orig_valid_query = http_base.StorageProvider.is_valid_query
-http_base.StorageProvider.is_valid_query = classmethod(
-    lambda c, q: (
-        StorageQueryValidationResult(
-            query=q, valid=False, reason="Deactivated in favour of cached_http"
-        )
-        if is_zenodo_url(q)
-        else orig_valid_query(q)
-    )
-)
 
 
 # Define settings for the Zenodo storage plugin
@@ -115,6 +98,9 @@ class ZenodoFileMetadata:
 
 
 class WrongChecksum(Exception):
+    observed: str
+    expected: str
+
     def __init__(self, observed: str, expected: str):
         self.observed = observed
         self.expected = expected
@@ -122,7 +108,7 @@ class WrongChecksum(Exception):
 
 
 retry_decorator = retry(
-    exceptions=(
+    exceptions=(  # pyright: ignore[reportArgumentType]
         httpx.HTTPError,
         TimeoutError,
         OSError,
@@ -132,21 +118,22 @@ retry_decorator = retry(
     tries=5,
     delay=3,
     backoff=2,
-    logger=ReretryLoggerAdapter(get_logger()),
+    logger=ReretryLoggerAdapter(get_logger()),  # pyright: ignore[reportArgumentType]
 )
 
 
 # Implementation of storage provider
 class StorageProvider(StorageProviderBase):
+    settings: StorageProviderSettings
+    cache: Cache | None
+
     def __post_init__(self):
         super().__post_init__()
 
-        # Set up cache directory
-        if self.settings.cache:
-            self.cache_dir = Path(self.settings.cache).expanduser()
-            self.cache_dir.mkdir(exist_ok=True, parents=True)
-        else:
-            self.cache_dir = None
+        # Set up cache
+        self.cache = (
+            Cache(cache_dir=Path(self.settings.cache)) if self.settings.cache else None
+        )
 
         # Initialize shared client for bounding connections and pipelining
         self._client: httpx.AsyncClient | None = None
@@ -155,16 +142,20 @@ class StorageProvider(StorageProviderBase):
         # Cache for record metadata to avoid repeated API calls
         self._record_cache: dict[str, dict[str, ZenodoFileMetadata]] = {}
 
+    @override
     def use_rate_limiter(self) -> bool:
         """Return False if no rate limiting is needed for this provider."""
         return False
 
-    def rate_limiter_key(self, query: str, operation: Operation) -> Any:
+    @override
+    def rate_limiter_key(self, query: str, operation: Operation) -> str:
         raise NotImplementedError()
 
+    @override
     def default_max_requests_per_second(self) -> float:
         raise NotImplementedError()
 
+    @override
     @classmethod
     def example_queries(cls) -> list[ExampleQuery]:
         """Return an example query with description for this storage provider."""
@@ -176,6 +167,7 @@ class StorageProvider(StorageProviderBase):
             )
         ]
 
+    @override
     @classmethod
     def is_valid_query(cls, query: str) -> StorageQueryValidationResult:
         """Only handle zenodo.org URLs"""
@@ -188,12 +180,10 @@ class StorageProvider(StorageProviderBase):
             reason="Not a Zenodo URL (only zenodo.org URLs are handled by this plugin)",
         )
 
+    @override
     @classmethod
     def get_storage_object_cls(cls):
         return StorageObject
-
-    def list_objects(self, query: Any) -> Iterable[str]:
-        raise NotImplementedError()
 
     @asynccontextmanager
     async def client(self):
@@ -231,7 +221,7 @@ class StorageProvider(StorageProviderBase):
                 await self._client.aclose()
                 self._client = None
 
-    def _get_rate_limit_wait_time(self, headers) -> float | None:
+    def _get_rate_limit_wait_time(self, headers: httpx.Headers) -> float | None:
         """
         Calculate wait time based on rate limit headers.
 
@@ -306,12 +296,12 @@ class StorageProvider(StorageProviderBase):
             data = json.loads(content)
 
         # Parse files array and build metadata dict
-        metadata = {}
+        metadata: dict[str, ZenodoFileMetadata] = {}
         files = data.get("files", [])
         for file_info in files:
-            filename = file_info.get("key")
-            checksum = file_info.get("checksum")
-            size = file_info.get("size", 0)
+            filename: str | None = file_info.get("key")
+            checksum: str | None = file_info.get("checksum")
+            size: int = file_info.get("size", 0)
 
             if not filename:
                 continue
@@ -326,13 +316,13 @@ class StorageProvider(StorageProviderBase):
 
 # Implementation of storage object
 class StorageObject(StorageObjectRead):
+    provider: StorageProvider  # pyright: ignore[reportIncompatibleVariableOverride]
+    record_id: str
+    filename: str
+    netloc: str
+
     def __post_init__(self):
         super().__post_init__()
-        if self.provider.cache_dir is not None:
-            self.query_path: Path = self.provider.cache_dir / self.local_suffix()
-            self.query_path.parent.mkdir(exist_ok=True, parents=True)
-        else:
-            self.query_path = None
 
         # Parse URL to extract record ID and filename
         # URL format: https://zenodo.org/records/{record_id}/files/{filename}
@@ -344,49 +334,56 @@ class StorageObject(StorageObjectRead):
         if _records != "records" or _files != "files":
             raise WorkflowError(
                 f"Invalid Zenodo URL format: {self.query}. "
-                "Expected format: https://zenodo.org/records/{{record_id}}/files/{{filename}}"
+                f"Expected format: https://zenodo.org/records/{{record_id}}/files/{{filename}}"
             )
 
         self.record_id = record_id
         self.filename = filename
         self.netloc = parsed.netloc
 
-    def local_suffix(self):
-        parsed = urlparse(self.query)
+    @override
+    def local_suffix(self) -> str:
+        """Return the local suffix for this object (used by parent class)."""
+        parsed = urlparse(str(self.query))
         return f"{parsed.netloc}{parsed.path}"
 
+    @override
     def get_inventory_parent(self) -> str | None:
         """Return the parent directory of this object."""
         # this is optional and can be left as is
         return None
 
+    @override
     async def managed_exists(self) -> bool:
         if self.provider.settings.skip_remote_checks:
             return True
 
-        exists = self.query_path and self.query_path.exists()
-        if exists:
-            return True
+        if self.provider.cache:
+            cached = self.provider.cache.get(str(self.query))
+            if cached is not None:
+                return True
 
         metadata = await self.provider.get_metadata(self.record_id, self.netloc)
         return self.filename in metadata
 
+    @override
     async def managed_mtime(self) -> float:
         return 0
 
+    @override
     async def managed_size(self) -> int:
         if self.provider.settings.skip_remote_checks:
             return 0
 
-        exists = self.query_path and self.query_path.exists()
-        if exists:
-            return self.query_path.stat().st_size
+        if self.provider.cache:
+            cached = self.provider.cache.get(str(self.query))
+            if cached is not None:
+                return cached.stat().st_size
 
         metadata = await self.provider.get_metadata(self.record_id, self.netloc)
         return metadata[self.filename].size if self.filename in metadata else 0
 
-    managed_local_footprint = managed_size
-
+    @override
     async def inventory(self, cache: IOCacheStorageInterface) -> None:
         """
         Gather file metadata (existence, size) from cache or remote.
@@ -399,16 +396,17 @@ class StorageObject(StorageObjectRead):
 
         if self.provider.settings.skip_remote_checks:
             cache.exists_in_storage[key] = True
-            cache.mtime[key] = 0
+            cache.mtime[key] = Mtime(storage=0)
             cache.size[key] = 0
             return
 
-        exists = self.query_path and self.query_path.exists()
-        if exists:
-            cache.exists_in_storage[key] = exists
-            cache.mtime[key] = 0
-            cache.size[key] = self.query_path.stat().st_size
-            return
+        if self.provider.cache:
+            cached = self.provider.cache.get(str(self.query))
+            if cached is not None:
+                cache.exists_in_storage[key] = True
+                cache.mtime[key] = Mtime(storage=0)
+                cache.size[key] = cached.stat().st_size
+                return
 
         metadata = await self.provider.get_metadata(self.record_id, self.netloc)
         exists = self.filename in metadata
@@ -416,21 +414,26 @@ class StorageObject(StorageObjectRead):
         cache.mtime[key] = Mtime(storage=0)
         cache.size[key] = metadata[self.filename].size if exists else 0
 
+    @override
     def cleanup(self):
         """Nothing to cleanup"""
         pass
 
-    def exists(self):
+    @override
+    def exists(self) -> bool:
         raise NotImplementedError()
 
-    def size(self):
+    @override
+    def size(self) -> int:
         raise NotImplementedError()
 
-    def mtime(self):
+    @override
+    def mtime(self) -> float:
         raise NotImplementedError()
 
-    def retrieve_object(self):
-        return NotImplementedError()
+    @override
+    def retrieve_object(self) -> None:
+        raise NotImplementedError()
 
     async def verify_checksum(self, path: Path) -> None:
         """
@@ -453,7 +456,7 @@ class StorageObject(StorageObjectRead):
         digest, checksum_expected = checksum.split(":", maxsplit=1)
 
         # Compute checksum asynchronously (hashlib releases GIL)
-        def compute_hash(digest=digest):
+        def compute_hash(digest: str = digest):
             with open(path, "rb") as f:
                 return hashlib.file_digest(f, digest).hexdigest().lower()
 
@@ -469,13 +472,14 @@ class StorageObject(StorageObjectRead):
         local_path.parent.mkdir(parents=True, exist_ok=True)
 
         # If already in cache, just copy
-        if self.query_path and self.query_path.exists():
-            # Verify cached file checksum
-            logger.info(
-                f"Retrieved {self.filename} of zenodo record {self.record_id} from cache"
-            )
-            shutil.copy2(self.query_path, local_path)
-            return
+        if self.provider.cache:
+            cached = self.provider.cache.get(str(self.query))
+            if cached is not None:
+                logger.info(
+                    f"Retrieved {self.filename} of zenodo record {self.record_id} from cache"
+                )
+                shutil.copy2(cached, local_path)
+                return
 
         try:
             # Download from Zenodo using a get request, rate limit errors are detected and
@@ -505,10 +509,8 @@ class StorageObject(StorageObjectRead):
             await self.verify_checksum(local_path)
 
             # Copy to cache after successful verification
-            if self.query_path:
-                self.query_path.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(local_path, self.query_path)
-                logger.info(f"Cached {self.filename} to {self.provider.cache_dir}")
+            if self.provider.cache:
+                self.provider.cache.put(str(self.query), local_path)
 
         except:
             if local_path.exists():

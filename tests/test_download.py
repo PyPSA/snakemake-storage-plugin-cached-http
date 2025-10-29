@@ -6,7 +6,6 @@
 
 import json
 import logging
-from pathlib import Path
 
 import pytest
 
@@ -162,7 +161,7 @@ async def test_cache_functionality(storage_provider, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_skip_remote_checks(storage_provider, tmp_path):
+async def test_skip_remote_checks(tmp_path):
     """Test that skip_remote_checks works correctly."""
     local_prefix = tmp_path / "local"
     local_prefix.mkdir()
