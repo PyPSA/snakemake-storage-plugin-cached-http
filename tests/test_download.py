@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 
-"""Functional tests for downloading and checksumming from Zenodo."""
+"""Functional tests for downloading and checksumming from Zenodo and data.pypsa.org."""
 
 import json
 import logging
@@ -16,7 +16,21 @@ from snakemake_storage_plugin_cached_http import (
     WrongChecksum,
 )
 
-TEST_URL = "https://zenodo.org/records/16810901/files/attributed_ports.json"
+# Test URLs and their metadata paths
+TEST_CONFIGS = {
+    "zenodo": {
+        "url": "https://zenodo.org/records/16810901/files/attributed_ports.json",
+        "path": "records/16810901/files/attributed_ports.json",
+        "netloc": "zenodo.org",
+        "has_size": True,
+    },
+    "pypsa": {
+        "url": "https://data.pypsa.org/workflows/eur/attributed_ports/2020-07-10/attributed_ports.json",
+        "path": "workflows/eur/attributed_ports/2020-07-10/attributed_ports.json",
+        "netloc": "data.pypsa.org",
+        "has_size": False,  # data.pypsa.org manifests don't include size
+    },
+}
 
 
 @pytest.fixture
@@ -44,33 +58,36 @@ def storage_provider(tmp_path):
     return provider
 
 
+@pytest.fixture(params=["zenodo", "pypsa"])
+def test_config(request):
+    """Provide test configuration (parametrized for zenodo and pypsa)."""
+    return TEST_CONFIGS[request.param]
+
+
 @pytest.fixture
-def storage_object(storage_provider):
-    """Create a StorageObject for the test file."""
-    # Create storage object
+def storage_object(test_config, storage_provider):
+    """Create a StorageObject for the test file (parametrized for zenodo and pypsa)."""
     obj = StorageObject(
-        query=TEST_URL,
+        query=test_config["url"],
         keep_local=False,
         retrieve=True,
         provider=storage_provider,
     )
-
     yield obj
 
 
 @pytest.mark.asyncio
-async def test_zenodo_metadata_fetch(storage_provider):
-    """Test that we can fetch metadata from Zenodo API."""
-    record_id = "16810901"
-    netloc = "zenodo.org"
+async def test_metadata_fetch(storage_provider, test_config):
+    """Test that we can fetch metadata from the API/manifest."""
+    metadata = await storage_provider.get_metadata(
+        test_config["path"], test_config["netloc"]
+    )
 
-    metadata = await storage_provider.get_metadata(record_id, netloc)
-
-    assert "attributed_ports.json" in metadata
-    file_meta = metadata["attributed_ports.json"]
-    assert file_meta.checksum is not None
-    assert file_meta.size > 0
-    assert file_meta.checksum.startswith("md5:")
+    assert metadata is not None
+    assert metadata.checksum is not None
+    assert metadata.checksum.startswith("md5:")
+    if test_config["has_size"]:
+        assert metadata.size > 0
 
 
 @pytest.mark.asyncio
@@ -81,17 +98,21 @@ async def test_storage_object_exists(storage_object):
 
 
 @pytest.mark.asyncio
-async def test_storage_object_size(storage_object):
+async def test_storage_object_size(storage_object, test_config):
     """Test that the storage object reports size correctly."""
     size = await storage_object.managed_size()
-    assert size > 0
-    # The file is a small JSON file, should be less than 1MB
-    assert size < 1_000_000
+    if test_config["has_size"]:
+        assert size > 0
+        # The file is a small JSON file, should be less than 1MB
+        assert size < 1_000_000
+    else:
+        # data.pypsa.org manifests don't include size
+        assert size == 0
 
 
 @pytest.mark.asyncio
 async def test_storage_object_mtime(storage_object):
-    """Test that mtime is 0 for immutable Zenodo URLs."""
+    """Test that mtime is 0 for immutable URLs."""
     mtime = await storage_object.managed_mtime()
     assert mtime == 0
 
@@ -112,21 +133,23 @@ async def test_download_and_checksum(storage_object, tmp_path):
     assert local_path.exists()
     assert local_path.stat().st_size > 0
 
-    # Verify it's valid JSON (use utf-8 with error handling for any encoding issues)
+    # Verify it's valid JSON
     with open(local_path, encoding="utf-8", errors="replace") as f:
         data = json.load(f)
-        assert isinstance(data, dict)
+        assert isinstance(data, (dict, list))
 
     # Verify checksum (should not raise WrongChecksum exception)
     await storage_object.verify_checksum(local_path)
 
 
 @pytest.mark.asyncio
-async def test_cache_functionality(storage_provider, tmp_path):
+async def test_cache_functionality(storage_provider, test_config, tmp_path):
     """Test that files are cached after download."""
+    url = test_config["url"]
+
     # First download
     obj1 = StorageObject(
-        query=TEST_URL,
+        query=url,
         keep_local=False,
         retrieve=True,
         provider=storage_provider,
@@ -140,13 +163,13 @@ async def test_cache_functionality(storage_provider, tmp_path):
 
     # Verify cache was populated
     assert obj1.provider.cache is not None
-    cached_path = obj1.provider.cache.get(str(obj1.query))
+    cached_path = obj1.provider.cache.get(url)
     assert cached_path is not None
     assert cached_path.exists()
 
     # Second download should use cache
     obj2 = StorageObject(
-        query=TEST_URL,
+        query=url,
         keep_local=False,
         retrieve=True,
         provider=storage_provider,
@@ -163,7 +186,7 @@ async def test_cache_functionality(storage_provider, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_skip_remote_checks(tmp_path):
+async def test_skip_remote_checks(test_config, tmp_path):
     """Test that skip_remote_checks works correctly."""
     local_prefix = tmp_path / "local"
     local_prefix.mkdir()
@@ -183,7 +206,7 @@ async def test_skip_remote_checks(tmp_path):
     )
 
     obj = StorageObject(
-        query=TEST_URL,
+        query=test_config["url"],
         keep_local=False,
         retrieve=True,
         provider=provider_skip,
