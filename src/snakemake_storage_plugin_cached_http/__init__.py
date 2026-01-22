@@ -2,7 +2,6 @@
 #
 # SPDX-License-Identifier: MIT
 
-import asyncio
 import hashlib
 import json
 import shutil
@@ -186,7 +185,7 @@ class StorageProvider(StorageProviderBase):
         return StorageQueryValidationResult(
             query=query,
             valid=False,
-            reason="Not a Zenodo URL (only zenodo.org URLs are handled by this plugin)",
+            reason="Only zenodo.org and data.pypsa.org URLs are handled by this plugin",
         )
 
     @override
@@ -287,7 +286,7 @@ class StorageProvider(StorageProviderBase):
         """
         if netloc in ("zenodo.org", "sandbox.zenodo.org"):
             return await self.get_zenodo_metadata(path, netloc)
-        elif netloc in "data.pypsa.org":
+        elif netloc == "data.pypsa.org":
             return await self.get_pypsa_metadata(path, netloc)
 
         raise WorkflowError(
@@ -355,11 +354,11 @@ class StorageProvider(StorageProviderBase):
         Retrieve and cache file metadata from data.pypsa.org manifest.
 
         Args:
-            record_id: The Zenodo record ID
+            path: Server path
             netloc: Network location (e.g., "data.pypsa.org")
 
         Returns:
-            Dictionary mapping filename to FileMetadata
+            FileMetadata for the requested file, or None if not found
         """
 
         # Check cache first
@@ -555,13 +554,13 @@ class StorageObject(StorageObjectRead):
         query = str(self.query)
         filename = basename(self.path)
 
-        metadata = self.provider.get_metadata(self.path, self.netloc)
-        if metadata.redirect is not None:
+        metadata = await self.provider.get_metadata(self.path, self.netloc)
+        if metadata is not None and metadata.redirect is not None:
             query = f"https://{self.netloc}/{metadata.redirect}"
 
         # If already in cache, just copy
         if self.provider.cache:
-            cached = self.provider.cache.get(str(self.query))
+            cached = self.provider.cache.get(query)
             if cached is not None:
                 logger.info(f"Retrieved {filename} from cache ({query})")
                 shutil.copy2(cached, local_path)
