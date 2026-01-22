@@ -15,6 +15,7 @@ from snakemake_storage_plugin_cached_http import (
     StorageProviderSettings,
     WrongChecksum,
 )
+from tests.conftest import assert_no_http_requests
 
 # Test URLs and their metadata paths
 TEST_CONFIGS = {
@@ -167,7 +168,7 @@ async def test_cache_functionality(storage_provider, test_config, tmp_path):
     assert cached_path is not None
     assert cached_path.exists()
 
-    # Second download should use cache
+    # Second download should use cache - verify by checking no HTTP requests are made
     obj2 = StorageObject(
         query=url,
         keep_local=False,
@@ -179,7 +180,8 @@ async def test_cache_functionality(storage_provider, test_config, tmp_path):
     local_path2.parent.mkdir(parents=True, exist_ok=True)
     obj2.local_path = lambda: local_path2
 
-    await obj2.managed_retrieve()
+    with assert_no_http_requests(storage_provider):
+        await obj2.managed_retrieve()
 
     # Both files should be identical
     assert local_path1.read_bytes() == local_path2.read_bytes()
