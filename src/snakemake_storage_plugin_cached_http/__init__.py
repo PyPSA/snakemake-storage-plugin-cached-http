@@ -5,17 +5,18 @@
 import asyncio
 import hashlib
 import json
-from logging import Logger
 import shutil
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from logging import Logger
 from pathlib import Path
-from typing_extensions import override
+from posixpath import basename, dirname, join, normpath, relpath
 from urllib.parse import urlparse
 
 import httpx
 import platformdirs
+import yaml
 from reretry import retry  # pyright: ignore[reportUnknownVariableType]
 from snakemake_interface_common.exceptions import WorkflowError
 from snakemake_interface_common.logging import get_logger
@@ -30,9 +31,10 @@ from snakemake_interface_storage_plugins.storage_provider import (
     StorageQueryValidationResult,
 )
 from tqdm_loggable.auto import tqdm
+from typing_extensions import override
 
 from .cache import Cache
-from .monkeypatch import is_zenodo_url  # noqa: F401 - applies monkeypatch on import
+from .monkeypatch import is_pypsa_or_zenodo_url
 
 logger = get_logger()
 
@@ -90,11 +92,12 @@ class StorageProviderSettings(SettingsBase):
 
 
 @dataclass
-class ZenodoFileMetadata:
-    """Metadata for a file in a Zenodo record."""
+class FileMetadata:
+    """Metadata for a file in a Zenodo or data.pypsa.org record."""
 
     checksum: str | None
     size: int
+    redirect: str | None = None  # used to indicate data.pypsa.org redirection
 
 
 class WrongChecksum(Exception):
@@ -140,7 +143,8 @@ class StorageProvider(StorageProviderBase):
         self._client_refcount: int = 0
 
         # Cache for record metadata to avoid repeated API calls
-        self._record_cache: dict[str, dict[str, ZenodoFileMetadata]] = {}
+        self._zenodo_record_cache: dict[str, dict[str, FileMetadata]] = {}
+        self._pypsa_manifest_cache: dict[str, dict[str, FileMetadata]] = {}
 
     @override
     def use_rate_limiter(self) -> bool:
@@ -162,16 +166,21 @@ class StorageProvider(StorageProviderBase):
         return [
             ExampleQuery(
                 query="https://zenodo.org/records/17249457/files/ARDECO-SNPTD.2021.table.csv",
-                description="A Zenodo file URL (currently the only supported HTTP source)",
+                description="A Zenodo file URL",
                 type=QueryType.INPUT,
-            )
+            ),
+            ExampleQuery(
+                query="https://data.pypsa.org/workflows/eur/eez/v12_20231025/World_EEZ_v12_20231025_LR.zip",
+                description="A data pypsa file URL",
+                type=QueryType.INPUT,
+            ),
         ]
 
     @override
     @classmethod
     def is_valid_query(cls, query: str) -> StorageQueryValidationResult:
         """Only handle zenodo.org URLs"""
-        if is_zenodo_url(query):
+        if is_pypsa_or_zenodo_url(query):
             return StorageQueryValidationResult(query=query, valid=True)
 
         return StorageQueryValidationResult(
@@ -265,22 +274,50 @@ class StorageProvider(StorageProviderBase):
             raise
 
     @retry_decorator
-    async def get_metadata(
-        self, record_id: str, netloc: str
-    ) -> dict[str, ZenodoFileMetadata]:
+    async def get_metadata(self, path: str, netloc: str) -> FileMetadata | None:
         """
-        Retrieve and cache file metadata for a Zenodo record.
+        Retrieve and cache file metadata for a Zenodo record or a data.pypsa.org file.
 
         Args:
-            record_id: The Zenodo record ID
+            path: Server path
             netloc: Network location (e.g., "zenodo.org")
 
         Returns:
-            Dictionary mapping filename to ZenodoFileMetadata
+            Dictionary mapping filename to FileMetadata
         """
+        if netloc in ("zenodo.org", "sandbox.zenodo.org"):
+            return await self.get_zenodo_metadata(path, netloc)
+        elif netloc in "data.pypsa.org":
+            return await self.get_pypsa_metadata(path, netloc)
+
+        raise WorkflowError(
+            "Cached-http storage plugin is only implemented for zenodo.org and data.pypsa.org urls"
+        )
+
+    async def get_zenodo_metadata(self, path: str, netloc: str) -> FileMetadata | None:
+        """
+        Retrieve and cache file metadata for a Zenodo record or a data.pypsa.org file.
+
+        Args:
+            path: Server path
+            netloc: Network location (e.g., "zenodo.org")
+
+        Returns:
+            Dictionary mapping filename to FileMetadata
+        """
+
+        # Zenodo record
+        _records, record_id, _files, filename = path.split("/", maxsplit=3)
+
+        if _records != "records" or _files != "files":
+            raise WorkflowError(
+                f"Invalid Zenodo URL format: http(s)://{netloc}/{path}. "
+                f"Expected format: https://zenodo.org/records/{{record_id}}/files/{{filename}}"
+            )
+
         # Check cache first
-        if record_id in self._record_cache:
-            return self._record_cache[record_id]
+        if record_id in self._zenodo_record_cache:
+            return self._zenodo_record_cache[record_id].get(filename)
 
         # Fetch from API
         api_url = f"https://{netloc}/api/records/{record_id}"
@@ -296,30 +333,87 @@ class StorageProvider(StorageProviderBase):
             data = json.loads(content)
 
         # Parse files array and build metadata dict
-        metadata: dict[str, ZenodoFileMetadata] = {}
+        metadata: dict[str, FileMetadata] = {}
         files = data.get("files", [])
         for file_info in files:
-            filename: str | None = file_info.get("key")
+            fn: str | None = file_info.get("key")
             checksum: str | None = file_info.get("checksum")
             size: int = file_info.get("size", 0)
 
-            if not filename:
+            if not fn:
                 continue
 
-            metadata[filename] = ZenodoFileMetadata(checksum=checksum, size=size)
+            metadata[fn] = FileMetadata(checksum=checksum, size=size)
 
         # Store in cache
-        self._record_cache[record_id] = metadata
+        self._zenodo_record_cache[record_id] = metadata
 
-        return metadata
+        return metadata.get(filename)
+
+    async def get_pypsa_metadata(self, path: str, netloc: str) -> FileMetadata | None:
+        """
+        Retrieve and cache file metadata from data.pypsa.org manifest.
+
+        Args:
+            record_id: The Zenodo record ID
+            netloc: Network location (e.g., "data.pypsa.org")
+
+        Returns:
+            Dictionary mapping filename to FileMetadata
+        """
+
+        # Check cache first
+        base_path = dirname(path)
+        while base_path:
+            if base_path in self._pypsa_manifest_cache:
+                filename = relpath(path, base_path)
+                return self._pypsa_manifest_cache[base_path].get(filename)
+            base_path = dirname(base_path)
+
+        # Fetch manifest
+        base_path = dirname(path)
+        while base_path:
+            manifest_url = f"https://{netloc}/{base_path}/manifest.yaml"
+
+            async with self.httpr("get", manifest_url) as response:
+                if response.status_code == 200:
+                    content = await response.aread()
+                    data = yaml.safe_load(content)
+                    break
+
+            base_path = dirname(base_path)
+        else:
+            raise WorkflowError(
+                f"Failed to fetch data.pypsa.org manifest for https://{netloc}/{path}"
+            )
+
+        # Parse files array and build metadata dict
+        metadata: dict[str, FileMetadata] = {}
+        files = data.get("files", {})
+        for filename, file_info in files.items():
+            redirect: str | None = file_info.get("redirect")
+            checksum: str | None = file_info.get("checksum")
+            size: int = file_info.get("size", 0)
+
+            if redirect is not None:
+                redirect = normpath(join(base_path, redirect))
+
+            metadata[filename] = FileMetadata(
+                checksum=checksum, size=size, redirect=redirect
+            )
+
+        # Store in cache
+        self._pypsa_manifest_cache[base_path] = metadata
+
+        filename = relpath(path, base_path)
+        return metadata.get(filename)
 
 
 # Implementation of storage object
 class StorageObject(StorageObjectRead):
     provider: StorageProvider  # pyright: ignore[reportIncompatibleVariableOverride]
-    record_id: str
-    filename: str
     netloc: str
+    path: str
 
     def __post_init__(self):
         super().__post_init__()
@@ -327,25 +421,13 @@ class StorageObject(StorageObjectRead):
         # Parse URL to extract record ID and filename
         # URL format: https://zenodo.org/records/{record_id}/files/{filename}
         parsed = urlparse(str(self.query))
-        _records, record_id, _files, filename = parsed.path.strip("/").split(
-            "/", maxsplit=3
-        )
-
-        if _records != "records" or _files != "files":
-            raise WorkflowError(
-                f"Invalid Zenodo URL format: {self.query}. "
-                f"Expected format: https://zenodo.org/records/{{record_id}}/files/{{filename}}"
-            )
-
-        self.record_id = record_id
-        self.filename = filename
         self.netloc = parsed.netloc
+        self.path = parsed.path.strip("/")
 
     @override
     def local_suffix(self) -> str:
         """Return the local suffix for this object (used by parent class)."""
-        parsed = urlparse(str(self.query))
-        return f"{parsed.netloc}{parsed.path}"
+        return f"{self.netloc}{self.path}"
 
     @override
     def get_inventory_parent(self) -> str | None:
@@ -363,8 +445,8 @@ class StorageObject(StorageObjectRead):
             if cached is not None:
                 return True
 
-        metadata = await self.provider.get_metadata(self.record_id, self.netloc)
-        return self.filename in metadata
+        metadata = await self.provider.get_metadata(self.path, self.netloc)
+        return metadata is not None
 
     @override
     async def managed_mtime(self) -> float:
@@ -380,8 +462,8 @@ class StorageObject(StorageObjectRead):
             if cached is not None:
                 return cached.stat().st_size
 
-        metadata = await self.provider.get_metadata(self.record_id, self.netloc)
-        return metadata[self.filename].size if self.filename in metadata else 0
+        metadata = await self.provider.get_metadata(self.path, self.netloc)
+        return metadata.size if metadata is not None else 0
 
     @override
     async def inventory(self, cache: IOCacheStorageInterface) -> None:
@@ -408,11 +490,11 @@ class StorageObject(StorageObjectRead):
                 cache.size[key] = cached.stat().st_size
                 return
 
-        metadata = await self.provider.get_metadata(self.record_id, self.netloc)
-        exists = self.filename in metadata
+        metadata = await self.provider.get_metadata(self.path, self.netloc)
+        exists = metadata is not None
         cache.exists_in_storage[key] = exists
         cache.mtime[key] = Mtime(storage=0)
-        cache.size[key] = metadata[self.filename].size if exists else 0
+        cache.size[key] = metadata.size if exists else 0
 
     @override
     def cleanup(self):
@@ -443,13 +525,11 @@ class StorageObject(StorageObjectRead):
             WrongChecksum
         """
         # Get cached or fetch record metadata
-        metadata = await self.provider.get_metadata(self.record_id, self.netloc)
-        if self.filename not in metadata:
-            raise WorkflowError(
-                f"File {self.filename} not found in Zenodo record {self.record_id}"
-            )
+        metadata = await self.provider.get_metadata(self.path, self.netloc)
+        if metadata is None:
+            raise WorkflowError(f"No metadata found for {self.query}")
 
-        checksum = metadata[self.filename].checksum
+        checksum = metadata.checksum
         if checksum is None:
             return
 
@@ -472,23 +552,28 @@ class StorageObject(StorageObjectRead):
         local_path = self.local_path()
         local_path.parent.mkdir(parents=True, exist_ok=True)
 
+        query = str(self.query)
+        filename = basename(self.path)
+
+        metadata = self.provider.get_metadata(self.path, self.netloc)
+        if metadata.redirect is not None:
+            query = f"https://{self.netloc}/{metadata.redirect}"
+
         # If already in cache, just copy
         if self.provider.cache:
             cached = self.provider.cache.get(str(self.query))
             if cached is not None:
-                logger.info(
-                    f"Retrieved {self.filename} of zenodo record {self.record_id} from cache"
-                )
+                logger.info(f"Retrieved {filename} from cache ({query})")
                 shutil.copy2(cached, local_path)
                 return
 
         try:
-            # Download from Zenodo using a get request, rate limit errors are detected and
+            # Download from Zenodo or data.pypsa.org using a get request, rate limit errors are detected and
             # raise WorkflowError to trigger a retry
-            async with self.provider.httpr("get", str(self.query)) as response:
+            async with self.provider.httpr("get", query) as response:
                 if response.status_code != 200:
                     raise WorkflowError(
-                        f"Failed to download from Zenodo: HTTP {response.status_code} ({self.query})"
+                        f"Failed to download: HTTP {response.status_code} ({query})"
                     )
 
                 total_size = int(response.headers.get("content-length", 0))
@@ -499,7 +584,7 @@ class StorageObject(StorageObjectRead):
                         total=total_size,
                         unit="B",
                         unit_scale=True,
-                        desc=self.filename,
+                        desc=filename,
                         position=None,
                         leave=True,
                     ) as pbar:
@@ -511,7 +596,7 @@ class StorageObject(StorageObjectRead):
 
             # Copy to cache after successful verification
             if self.provider.cache:
-                self.provider.cache.put(str(self.query), local_path)
+                self.provider.cache.put(query, local_path)
 
         except:
             if local_path.exists():
