@@ -55,14 +55,23 @@ def test_is_valid_query_zenodo():
     assert result.valid is True
 
 
-def test_is_valid_query_non_zenodo():
+def test_is_valid_query_pypsa():
+    """Test that is_valid_query accepts data.pypsa.org URLs."""
+    from snakemake_storage_plugin_cached_http import StorageProvider
+
+    result = StorageProvider.is_valid_query(
+        "https://data.pypsa.org/workflows/eur/eez/v12_20231025/World_EEZ_v12_20231025_LR.zip"
+    )
+    assert result.valid is True
+
+
+def test_is_valid_query_non_zenodo_or_pypsa():
     """Test that is_valid_query rejects non-zenodo URLs."""
     from snakemake_storage_plugin_cached_http import StorageProvider
 
-    # Non-Zenodo URL should be rejected
+    # Non-Zenodo/PyPSA URL should be rejected
     result = StorageProvider.is_valid_query("https://example.com/file.txt")
     assert result.valid is False
-    assert "zenodo" in result.reason.lower()
 
 
 def test_example_queries():

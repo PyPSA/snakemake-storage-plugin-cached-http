@@ -17,9 +17,13 @@ from snakemake_interface_storage_plugins.storage_provider import (
 )
 
 
-def is_zenodo_url(url: str) -> bool:
+def is_pypsa_or_zenodo_url(url: str) -> bool:
     parsed = urlparse(url)
-    return parsed.netloc in ("zenodo.org", "sandbox.zenodo.org") and parsed.scheme in (
+    return parsed.netloc in (
+        "zenodo.org",
+        "sandbox.zenodo.org",
+        "data.pypsa.org",
+    ) and parsed.scheme in (
         "http",
         "https",
     )
@@ -34,7 +38,7 @@ http_base.StorageProvider.is_valid_query = classmethod(
             valid=False,
             reason="Deactivated in favour of cached_http",
         )
-        if is_zenodo_url(q)
+        if is_pypsa_or_zenodo_url(q)
         else orig_valid_query(q)
     )
 )

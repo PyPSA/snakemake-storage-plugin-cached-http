@@ -7,12 +7,14 @@ SPDX-License-Identifier: CC-BY-4.0
 
 A Snakemake storage plugin for downloading files via HTTP with local caching, checksum verification, and adaptive rate limiting.
 
-**Note:** This plugin is currently specifically designed for zenodo.org URLs.
+**Supported sources:**
+- **zenodo.org** - Zenodo data repository (checksum from API)
+- **data.pypsa.org** - PyPSA data repository (checksum from manifest.yaml)
 
 ## Features
 
 - **Local caching**: Downloads are cached to avoid redundant transfers (can be disabled)
-- **Checksum verification**: Automatically verifies MD5 checksums from Zenodo API
+- **Checksum verification**: Automatically verifies checksums (from Zenodo API or data.pypsa.org manifests)
 - **Rate limit handling**: Automatically respects Zenodo's rate limits using `X-RateLimit-*` headers with exponential backoff retry
 - **Concurrent download control**: Limits simultaneous downloads to prevent overwhelming Zenodo
 - **Progress bars**: Shows download progress with tqdm
@@ -64,14 +66,22 @@ If you don't explicitly configure it, the plugin will use default settings autom
 
 ## Usage
 
-Use Zenodo URLs directly in your rules. Snakemake automatically detects zenodo.org URLs and routes them to this plugin:
+Use Zenodo or data.pypsa.org URLs directly in your rules. Snakemake automatically detects supported URLs and routes them to this plugin:
 
 ```python
-rule download_data:
+rule download_zenodo:
     input:
         storage("https://zenodo.org/records/3520874/files/natura.tiff"),
     output:
         "resources/natura.tiff"
+    shell:
+        "cp {input} {output}"
+
+rule download_pypsa:
+    input:
+        storage("https://data.pypsa.org/workflows/eur/eez/v12_20231025/World_EEZ_v12_20231025_LR.zip"),
+    output:
+        "resources/eez.zip"
     shell:
         "cp {input} {output}"
 ```
@@ -93,11 +103,11 @@ rule download_data:
 The plugin will:
 1. Check if the file exists in the cache (if caching is enabled)
 2. If cached, copy from cache (fast)
-3. If not cached, download from Zenodo with:
+3. If not cached, download with:
    - Progress bar showing download status
    - Automatic rate limit handling with exponential backoff retry
    - Concurrent download limiting
-   - MD5 checksum verification against Zenodo API metadata
+   - Checksum verification (from Zenodo API or data.pypsa.org manifest)
 4. Store in cache for future use (if caching is enabled)
 
 ### Example: CI/CD Configuration
@@ -129,19 +139,19 @@ The plugin automatically:
 
 ## URL Handling
 
-- Only handles URLs containing `zenodo.org`
+- Handles URLs from `zenodo.org`, `sandbox.zenodo.org`, and `data.pypsa.org`
 - Other HTTP(S) URLs are handled by the standard `snakemake-storage-plugin-http`
 - Both plugins can coexist in the same workflow
 
 ### Plugin Priority
 
 When using `storage()` without specifying a plugin name, Snakemake checks all installed plugins:
-- **Cached HTTP plugin**: Only accepts zenodo.org URLs (`is_valid_query` returns True only for zenodo.org)
+- **Cached HTTP plugin**: Only accepts zenodo.org and data.pypsa.org URLs
 - **HTTP plugin**: Accepts all HTTP/HTTPS URLs (including zenodo.org)
 
-If both plugins are installed, zenodo.org URLs are ambiguous - both plugins accept them.
-Typically snakemake would raise an error: **"Multiple suitable storage providers found"** if you try to use `storage()` without specifying which plugin to use, ie. one needs to explicitly call the Cached HTTP provider for zenodo.org URLs using `storage.cached_http(url)` instead of `storage(url)`,
-but we monkey-patch the http plugin to refuse zenodo.org urls.
+If both plugins are installed, supported URLs would be ambiguous - both plugins accept them.
+Typically snakemake would raise an error: **"Multiple suitable storage providers found"** if you try to use `storage()` without specifying which plugin to use, ie. one needs to explicitly call the Cached HTTP provider using `storage.cached_http(url)` instead of `storage(url)`,
+but we monkey-patch the http plugin to refuse zenodo.org and data.pypsa.org URLs.
 
 ## License
 
