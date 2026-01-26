@@ -218,7 +218,10 @@ class StorageProvider(StorageProviderBase):
             timeout = httpx.Timeout(60, pool=None)
 
             self._client = httpx.AsyncClient(
-                follow_redirects=True, limits=limits, timeout=timeout
+                follow_redirects=True,
+                limits=limits,
+                timeout=timeout,
+                headers={"Accept-Encoding": "gzip, deflate, br"},
             )
 
         try:
