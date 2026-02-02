@@ -23,6 +23,7 @@ def is_pypsa_or_zenodo_url(url: str) -> bool:
         "zenodo.org",
         "sandbox.zenodo.org",
         "data.pypsa.org",
+        "storage.googleapis.com",
     ) and parsed.scheme in (
         "http",
         "https",
