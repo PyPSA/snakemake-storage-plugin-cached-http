@@ -81,8 +81,8 @@ def test_config(request):
 
 
 @pytest.fixture(params=[k for k, v in TEST_CONFIGS.items() if v["has_mtime"]])
-def dynamic_test_config(request):
-    """Provide test configuration for dynamic sources only (those with mtime support)."""
+def mutable_test_config(request):
+    """Provide test configuration for mutable sources only (those with mtime support)."""
     return TEST_CONFIGS[request.param]
 
 
@@ -257,11 +257,11 @@ async def test_wrong_checksum_detection(storage_object, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_cache_staleness_for_dynamic_sources(
-    dynamic_test_config, tmp_path, test_logger
+async def test_cache_staleness_for_mutable_sources(
+    mutable_test_config, tmp_path, test_logger
 ):
-    """Test that stale cached files are re-downloaded for dynamic sources."""
-    url = dynamic_test_config["url"]
+    """Test that stale cached files are re-downloaded for mutable sources."""
+    url = mutable_test_config["url"]
 
     cache_dir = tmp_path / "cache"
     cache_dir.mkdir()
