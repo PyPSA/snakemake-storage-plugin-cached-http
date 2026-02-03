@@ -84,7 +84,7 @@ class StorageProviderSettings(SettingsBase):
             "env_var": True,
         },
     )
-    max_concurrent_downloads: int | None = field(
+    max_concurrent_downloads: int = field(
         default=3,
         metadata={
             "help": "Maximum number of concurrent downloads.",
