@@ -4,8 +4,6 @@
 
 """Basic import tests for the snakemake-storage-plugin-cached-http package."""
 
-import pytest
-
 
 def test_import_module():
     """Test that the main module can be imported."""
