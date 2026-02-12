@@ -518,7 +518,7 @@ class StorageObject(StorageObjectRead):
     @override
     def local_suffix(self) -> str:
         """Return the local suffix for this object (used by parent class)."""
-        return f"{self.netloc}{self.path}"
+        return f"{self.netloc}/{self.path}"
 
     @override
     def get_inventory_parent(self) -> str | None:
