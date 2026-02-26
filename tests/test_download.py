@@ -8,11 +8,14 @@ import json
 import logging
 import os
 import time
+from contextlib import asynccontextmanager
+from unittest.mock import MagicMock
 from urllib.parse import urlparse
 
 import pytest
 
 from snakemake_storage_plugin_cached_http import (
+    FileMetadata,
     StorageObject,
     StorageProvider,
     StorageProviderSettings,
@@ -339,3 +342,84 @@ async def test_cache_staleness_for_mutable_sources(
     downloaded_content = cached_path.read_bytes()
     assert b'"stale": true' not in downloaded_content
     assert downloaded_content == original_content
+
+
+def make_mock_httpr(content: bytes, fail_at: int | None):
+    """
+    Factory for a mock httpr context manager simulating a range-capable HTTP server.
+
+    Args:
+        content: The full file content to serve.
+        fail_at: If set, drop the connection after serving this many bytes on the
+                 first (non-Range) request, simulating a mid-transfer interruption.
+                 If None, serve the full content without interruption.
+    """
+
+    @asynccontextmanager
+    async def mock_httpr(method, request_url, headers=None):
+        range_header = headers.get("Range") if headers else None
+        mock_httpr.received_range_headers.append(range_header)
+
+        response = MagicMock()
+        if range_header is None:
+            response.status_code = 200
+            chunk = content
+            drop_at = fail_at
+        else:
+            response.status_code = 206
+            offset = int(range_header.removeprefix("bytes=").removesuffix("-"))
+            chunk = content[offset:]
+            drop_at = None
+
+        async def aiter_bytes(chunk_size=8192):
+            if drop_at is None:
+                yield chunk
+            else:
+                yield chunk[:drop_at]
+                raise ConnectionError("peer closed connection")
+
+        response.aiter_bytes = aiter_bytes
+        response.headers = {"content-length": str(len(chunk))}
+
+        yield response
+
+    mock_httpr.received_range_headers = []
+
+    return mock_httpr
+
+
+@pytest.mark.asyncio
+async def test_resume_on_partial_file(storage_provider, tmp_path):
+    """Test that downloads resume from partial files using HTTP Range requests."""
+    url = TEST_CONFIGS["zenodo"]["url"]
+    full_content = b'{"port": "test", "lat": 1.0, "lon": 2.0}'
+
+    fail_at = 10
+    mock_httpr = make_mock_httpr(full_content, fail_at=fail_at)
+    storage_provider.httpr = mock_httpr
+    storage_provider.cache = None
+
+    obj = StorageObject(
+        query=url,
+        keep_local=False,
+        retrieve=True,
+        provider=storage_provider,
+    )
+
+    local_path = tmp_path / "resume_test" / "file.json"
+    local_path.parent.mkdir(parents=True, exist_ok=True)
+    obj.local_path = lambda: local_path
+
+    async def mock_get_metadata(url):
+        return FileMetadata(checksum=None, size=0, mtime=0)
+
+    obj.provider.get_metadata = mock_get_metadata
+
+    await obj.managed_retrieve()
+
+    assert len(mock_httpr.received_range_headers) == 2
+    assert mock_httpr.received_range_headers[0] is None  # first attempt: no Range header
+    assert mock_httpr.received_range_headers[1] == f"bytes={fail_at}-"
+    assert local_path.read_bytes() == full_content
+
+

@@ -17,6 +17,10 @@ raise *"Multiple suitable storage providers found"* for any HTTP(S) URL.
   mtime read from `Content-Length` and `Last-Modified` response headers. Servers that do not
   support `HEAD` requests are handled gracefully (size and mtime default to 0). No checksum
   is available for generic URLs.
+- Resumable downloads: interrupted transfers are continued from where they left off using
+  HTTP `Range` requests (`206 Partial Content`). Servers that do not support range requests
+  fall back to a full re-download. Partial files are preserved across retries for
+  connection/timeout errors, and discarded on checksum mismatches or other errors.
 
 ### Removed
 

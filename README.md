@@ -19,6 +19,7 @@ A Snakemake storage plugin for downloading files via HTTP with local caching, ch
 - **Checksum verification**: Automatically verifies checksums (from Zenodo API, data.pypsa.org manifests, or GCS object metadata)
 - **Rate limit handling**: Automatically respects Zenodo's rate limits using `X-RateLimit-*` headers with exponential backoff retry
 - **Concurrent download control**: Limits simultaneous downloads to prevent overwhelming servers
+- **Resumable downloads**: Interrupted transfers resume from where they left off using HTTP range requests
 - **Progress bars**: Shows download progress with tqdm
 - **Immutable URLs**: Returns mtime=0 for Zenodo and data.pypsa.org (persistent URLs); uses actual mtime for GCS and generic HTTP
 - **Environment variable support**: Configure via environment variables for CI/CD workflows
@@ -154,6 +155,7 @@ The plugin automatically:
 - Uses `X-RateLimit-Reset` to calculate wait time
 - Retries failed requests with exponential backoff (up to 5 attempts)
 - Handles transient errors: HTTP errors, timeouts, checksum mismatches, and network issues
+- Resumes interrupted downloads using `Range` requests where supported by the server
 
 ## URL Handling
 

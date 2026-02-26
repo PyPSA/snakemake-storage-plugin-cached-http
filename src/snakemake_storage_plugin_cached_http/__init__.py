@@ -264,19 +264,23 @@ class StorageProvider(StorageProviderBase):
         return wait_seconds
 
     @asynccontextmanager
-    async def httpr(self, method: str, url: str):
+    async def httpr(self, method: str, url: str, headers: dict | None = None):
         """
         HTTP request wrapper with rate limiting and exception logging.
 
         Args:
             method: HTTP method (e.g., "get", "post")
             url: URL to request
+            headers: Optional additional HTTP headers
 
         Yields:
             httpx.Response object
         """
         try:
-            async with self.client() as client, client.stream(method, url) as response:
+            async with (
+                self.client() as client,
+                client.stream(method, url, headers=headers) as response,
+            ):
                 wait_time = self._get_rate_limit_wait_time(response.headers)
                 if wait_time is not None:
                     logger.info(
@@ -728,20 +732,33 @@ class StorageObject(StorageObjectRead):
                     return
 
         try:
+            # Check for existing partial file to resume
+            offset = local_path.stat().st_size if local_path.exists() else 0
+            headers = {"Range": f"bytes={offset}-"} if offset > 0 else None
+
             # Download using a get request, rate limit errors are detected and raise
             # WorkflowError to trigger a retry
-            async with self.provider.httpr("get", query) as response:
-                if response.status_code != 200:
+            async with self.provider.httpr("get", query, headers=headers) as response:
+                if response.status_code == 206:
+                    # Server supports resume - append to existing partial file
+                    mode = "ab"
+                    logger.info(f"Resuming {filename} from byte {offset}")
+                elif response.status_code == 200:
+                    # Server doesn't support Range - discard partial and restart
+                    mode = "wb"
+                    offset = 0
+                else:
                     raise WorkflowError(
                         f"Failed to download: HTTP {response.status_code} ({query})"
                     )
 
-                total_size = int(response.headers.get("content-length", 0))
+                total_size = int(response.headers.get("content-length", 0)) + offset
 
                 # Download to local path with progress bar
-                with local_path.open(mode="wb") as f:
+                with local_path.open(mode=mode) as f:
                     with tqdm(
                         total=total_size,
+                        initial=offset,
                         unit="B",
                         unit_scale=True,
                         desc=filename,
@@ -758,7 +775,11 @@ class StorageObject(StorageObjectRead):
             if self.provider.cache:
                 self.provider.cache.put(query, local_path)
 
+        except (TimeoutError, ConnectionError, httpx.TransportError):
+            # Mid-transfer interruption - keep partial file for resume on next retry
+            raise
         except:
+            # Any other error (wrong checksum, HTTP error, unexpected) - delete and restart
             if local_path.exists():
                 local_path.unlink()
             raise
