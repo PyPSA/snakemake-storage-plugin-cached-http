@@ -11,6 +11,7 @@ A Snakemake storage plugin for downloading files via HTTP with local caching, ch
 - **zenodo.org** - Zenodo data repository (checksum from API)
 - **data.pypsa.org** - PyPSA data repository (checksum from manifest.yaml)
 - **storage.googleapis.com** - Google Cloud Storage (checksum from GCS JSON API)
+- **any http(s) URL** - Generic fallback with size/mtime from HTTP headers
 
 ## Features
 
@@ -19,7 +20,7 @@ A Snakemake storage plugin for downloading files via HTTP with local caching, ch
 - **Rate limit handling**: Automatically respects Zenodo's rate limits using `X-RateLimit-*` headers with exponential backoff retry
 - **Concurrent download control**: Limits simultaneous downloads to prevent overwhelming servers
 - **Progress bars**: Shows download progress with tqdm
-- **Immutable URLs**: Returns mtime=0 for Zenodo and data.pypsa.org (persistent URLs); uses actual mtime for GCS
+- **Immutable URLs**: Returns mtime=0 for Zenodo and data.pypsa.org (persistent URLs); uses actual mtime for GCS and generic HTTP
 - **Environment variable support**: Configure via environment variables for CI/CD workflows
 
 ## Installation
@@ -67,7 +68,7 @@ If you don't explicitly configure it, the plugin will use default settings autom
 
 ## Usage
 
-Use Zenodo, data.pypsa.org, or Google Cloud Storage URLs directly in your rules. Snakemake automatically detects supported URLs and routes them to this plugin:
+Use any HTTP(S) URL directly in your rules. Snakemake automatically routes all HTTP(S) URLs to this plugin:
 
 ```python
 rule download_zenodo:
@@ -93,6 +94,14 @@ rule download_gcs:
         "resources/cba_projects.zip"
     shell:
         "cp {input} {output}"
+
+rule download_generic:
+    input:
+        storage("https://example.com/data/dataset.csv"),
+    output:
+        "resources/dataset.csv"
+    shell:
+        "cp {input} {output}"
 ```
 
 Or if you configured a tagged storage entity:
@@ -116,7 +125,7 @@ The plugin will:
    - Progress bar showing download status
    - Automatic rate limit handling with exponential backoff retry
    - Concurrent download limiting
-   - Checksum verification (from Zenodo API, data.pypsa.org manifest, or GCS metadata)
+   - Checksum verification where available (Zenodo API, data.pypsa.org manifest, GCS metadata)
 4. Store in cache for future use (if caching is enabled)
 
 ### Example: CI/CD Configuration
@@ -148,19 +157,19 @@ The plugin automatically:
 
 ## URL Handling
 
-- Handles URLs from `zenodo.org`, `sandbox.zenodo.org`, `data.pypsa.org`, and `storage.googleapis.com`
-- Other HTTP(S) URLs are handled by the standard `snakemake-storage-plugin-http`
-- Both plugins can coexist in the same workflow
+This plugin accepts **all HTTP(S) URLs** and replaces `snakemake-storage-plugin-http`. It provides
+enhanced support for specific sources:
 
-### Plugin Priority
+| Source | Checksum | mtime | Immutable |
+|---|---|---|---|
+| `zenodo.org`, `sandbox.zenodo.org` | ✓ (from API) | — | ✓ |
+| `data.pypsa.org` | ✓ (from manifest.yaml) | — | ✓ |
+| `storage.googleapis.com` | ✓ (from GCS API) | ✓ | — |
+| any other HTTP(S) | — | ✓ (Last-Modified) | — |
 
-When using `storage()` without specifying a plugin name, Snakemake checks all installed plugins:
-- **Cached HTTP plugin**: Only accepts zenodo.org, data.pypsa.org, and storage.googleapis.com URLs
-- **HTTP plugin**: Accepts all HTTP/HTTPS URLs (including zenodo.org)
-
-If both plugins are installed, supported URLs would be ambiguous - both plugins accept them.
-Typically snakemake would raise an error: **"Multiple suitable storage providers found"** if you try to use `storage()` without specifying which plugin to use, ie. one needs to explicitly call the Cached HTTP provider using `storage.cached_http(url)` instead of `storage(url)`,
-but we monkey-patch the http plugin to refuse zenodo.org, data.pypsa.org, and storage.googleapis.com URLs.
+Generic HTTP URLs are treated as mutable: size and mtime are read from `Content-Length` and
+`Last-Modified` response headers. Servers that do not support `HEAD` requests are handled
+gracefully (size and mtime default to 0).
 
 ## License
 
