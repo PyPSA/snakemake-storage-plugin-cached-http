@@ -25,25 +25,25 @@ TEST_CONFIGS = {
     "zenodo": {
         "url": "https://zenodo.org/records/16810901/files/attributed_ports.json",
         "has_size": True,
-        "has_mtime": False,  # Zenodo records are immutable
+        "is_immutable": True,
         "has_checksum": True,
     },
     "pypsa": {
         "url": "https://data.pypsa.org/workflows/eur/attributed_ports/2020-07-10/attributed_ports.json",
         "has_size": False,  # data.pypsa.org manifests don't include size
-        "has_mtime": False,  # data.pypsa.org files are immutable
+        "is_immutable": True,
         "has_checksum": True,
     },
     "gcs": {
         "url": "https://storage.googleapis.com/open-tyndp-data-store/cached-http/attributed_ports/archive/2020-07-10/attributed_ports.json",
         "has_size": True,
-        "has_mtime": True,  # GCS provides modification timestamps
+        "is_immutable": False,  # GCS provides modification timestamps
         "has_checksum": True,
     },
     "http": {
-        "url": "https://httpbin.org/json",
+        "url": "https://datacatalogfiles.worldbank.org/ddh-published/0038118/1/DR0046414/attributed_ports.geojson",
         "has_size": True,
-        "has_mtime": False,  # httpbin doesn't return Last-Modified
+        "is_immutable": False,
         "has_checksum": False,  # Generic HTTP has no checksum
     },
 }
@@ -82,7 +82,7 @@ def test_config(request):
     return TEST_CONFIGS[request.param]
 
 
-@pytest.fixture(params=[k for k, v in TEST_CONFIGS.items() if v["has_mtime"]])
+@pytest.fixture(params=[k for k, v in TEST_CONFIGS.items() if not v["is_immutable"]])
 def mutable_test_config(request):
     """Provide test configuration for mutable sources only (those with mtime support)."""
     return TEST_CONFIGS[request.param]
@@ -137,10 +137,10 @@ async def test_storage_object_size(storage_object, test_config):
 async def test_storage_object_mtime(storage_object, test_config):
     """Test that mtime is 0 for immutable URLs, non-zero for mutable sources."""
     mtime = await storage_object.managed_mtime()
-    if test_config["has_mtime"]:
-        assert mtime > 0
-    else:
+    if test_config["is_immutable"]:
         assert mtime == 0
+    else:
+        assert mtime > 0
 
 
 @pytest.mark.asyncio
@@ -159,10 +159,11 @@ async def test_download_and_checksum(storage_object, tmp_path):
     assert local_path.exists()
     assert local_path.stat().st_size > 0
 
-    # Verify it's valid JSON
+    # Verify it's valid JSON (raw_decode ignores trailing garbage that the worldbank server appends)
     with open(local_path, encoding="utf-8", errors="replace") as f:
-        data = json.load(f)
-        assert isinstance(data, (dict, list))
+        content = f.read()
+    data, _ = json.JSONDecoder().raw_decode(content)
+    assert isinstance(data, (dict, list))
 
     # Verify checksum (should not raise WrongChecksum exception)
     await storage_object.verify_checksum(local_path)
