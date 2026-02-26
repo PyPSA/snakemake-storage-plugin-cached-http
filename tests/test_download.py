@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import time
+from urllib.parse import urlparse
 
 import pytest
 
@@ -23,24 +24,27 @@ from tests.conftest import assert_no_http_requests
 TEST_CONFIGS = {
     "zenodo": {
         "url": "https://zenodo.org/records/16810901/files/attributed_ports.json",
-        "path": "records/16810901/files/attributed_ports.json",
-        "netloc": "zenodo.org",
         "has_size": True,
         "has_mtime": False,  # Zenodo records are immutable
+        "has_checksum": True,
     },
     "pypsa": {
         "url": "https://data.pypsa.org/workflows/eur/attributed_ports/2020-07-10/attributed_ports.json",
-        "path": "workflows/eur/attributed_ports/2020-07-10/attributed_ports.json",
-        "netloc": "data.pypsa.org",
         "has_size": False,  # data.pypsa.org manifests don't include size
         "has_mtime": False,  # data.pypsa.org files are immutable
+        "has_checksum": True,
     },
     "gcs": {
         "url": "https://storage.googleapis.com/open-tyndp-data-store/cached-http/attributed_ports/archive/2020-07-10/attributed_ports.json",
-        "path": "open-tyndp-data-store/cached-http/attributed_ports/archive/2020-07-10/attributed_ports.json",
-        "netloc": "storage.googleapis.com",
         "has_size": True,
         "has_mtime": True,  # GCS provides modification timestamps
+        "has_checksum": True,
+    },
+    "http": {
+        "url": "https://httpbin.org/json",
+        "has_size": True,
+        "has_mtime": False,  # httpbin doesn't return Last-Modified
+        "has_checksum": False,  # Generic HTTP has no checksum
     },
 }
 
@@ -65,18 +69,16 @@ def storage_provider(tmp_path, test_logger):
         max_concurrent_downloads=3,
     )
 
-    provider = StorageProvider(
+    return StorageProvider(
         local_prefix=local_prefix,
         logger=test_logger,
         settings=settings,
     )
 
-    return provider
 
-
-@pytest.fixture(params=["zenodo", "pypsa", "gcs"])
+@pytest.fixture(params=list(TEST_CONFIGS))
 def test_config(request):
-    """Provide test configuration (parametrized for zenodo, pypsa, and gcs)."""
+    """Provide test configuration (parametrized for all backends)."""
     return TEST_CONFIGS[request.param]
 
 
@@ -88,7 +90,7 @@ def mutable_test_config(request):
 
 @pytest.fixture
 def storage_object(test_config, storage_provider):
-    """Create a StorageObject for the test file (parametrized for zenodo and pypsa)."""
+    """Create a StorageObject for the test file (parametrized for all backends)."""
     obj = StorageObject(
         query=test_config["url"],
         keep_local=False,
@@ -101,13 +103,12 @@ def storage_object(test_config, storage_provider):
 @pytest.mark.asyncio
 async def test_metadata_fetch(storage_provider, test_config):
     """Test that we can fetch metadata from the API/manifest."""
-    metadata = await storage_provider.get_metadata(
-        test_config["path"], test_config["netloc"]
-    )
+    metadata = await storage_provider.get_metadata(urlparse(test_config["url"]))
 
     assert metadata is not None
-    assert metadata.checksum is not None
-    assert metadata.checksum.startswith("md5:")
+    if test_config["has_checksum"]:
+        assert metadata.checksum is not None
+        assert metadata.checksum.startswith("md5:")
     if test_config["has_size"]:
         assert metadata.size > 0
 
@@ -245,14 +246,15 @@ async def test_skip_remote_checks(test_config, tmp_path, test_logger):
 
 
 @pytest.mark.asyncio
-async def test_wrong_checksum_detection(storage_object, tmp_path):
+async def test_wrong_checksum_detection(storage_object, test_config, tmp_path):
     """Test that corrupted files are detected via checksum."""
-    # Create a corrupted file
     corrupted_path = tmp_path / "corrupted.json"
     corrupted_path.write_text('{"corrupted": "data"}')
 
-    # Verify checksum should raise WrongChecksum
-    with pytest.raises(WrongChecksum):
+    if test_config["has_checksum"]:
+        with pytest.raises(WrongChecksum):
+            await storage_object.verify_checksum(corrupted_path)
+    else:
         await storage_object.verify_checksum(corrupted_path)
 
 
