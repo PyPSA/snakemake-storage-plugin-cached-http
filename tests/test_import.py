@@ -63,12 +63,19 @@ def test_is_valid_query_pypsa():
     assert result.valid is True
 
 
-def test_is_valid_query_non_zenodo_or_pypsa():
-    """Test that is_valid_query rejects non-zenodo URLs."""
+def test_is_valid_query_generic_http():
+    """Test that is_valid_query accepts generic http/https URLs as fallback."""
     from snakemake_storage_plugin_cached_http import StorageProvider
 
-    # Non-Zenodo/PyPSA URL should be rejected
+    # Generic HTTP URL should be accepted as fallback
     result = StorageProvider.is_valid_query("https://example.com/file.txt")
+    assert result.valid is True
+
+    # Non-HTTP schemes should be rejected
+    result = StorageProvider.is_valid_query("ftp://example.com/file.txt")
+    assert result.valid is False
+
+    result = StorageProvider.is_valid_query("s3://bucket/key")
     assert result.valid is False
 
 

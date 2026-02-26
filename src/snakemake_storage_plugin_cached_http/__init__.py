@@ -11,10 +11,12 @@ import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
+from email.utils import parsedate_to_datetime
 from logging import Logger
 from pathlib import Path
 from posixpath import basename, dirname, join, normpath, relpath
-from urllib.parse import quote, urlparse
+from typing import cast
+from urllib.parse import ParseResult, quote, urlparse
 
 import httpx
 import platformdirs
@@ -36,7 +38,6 @@ from tqdm_loggable.auto import tqdm
 from typing_extensions import override
 
 from .cache import Cache
-from .monkeypatch import is_pypsa_or_zenodo_url
 
 logger = get_logger()
 
@@ -183,19 +184,25 @@ class StorageProvider(StorageProviderBase):
                 description="A Google Cloud Storage file URL",
                 type=QueryType.INPUT,
             ),
+            ExampleQuery(
+                query="https://example.com/data/file.csv",
+                description="A generic HTTP/HTTPS file URL",
+                type=QueryType.INPUT,
+            ),
         ]
 
     @override
     @classmethod
     def is_valid_query(cls, query: str) -> StorageQueryValidationResult:
-        """Only handle zenodo.org URLs"""
-        if is_pypsa_or_zenodo_url(query):
+        """Handle all http/https URLs."""
+        parsed = urlparse(query)
+        if parsed.scheme in ("http", "https") and parsed.netloc:
             return StorageQueryValidationResult(query=query, valid=True)
 
         return StorageQueryValidationResult(
             query=query,
             valid=False,
-            reason="Only zenodo.org, data.pypsa.org, and storage.googleapis.com URLs are handled by this plugin",
+            reason="Only http and https URLs are handled by this plugin",
         )
 
     @override
@@ -283,59 +290,95 @@ class StorageProvider(StorageProviderBase):
             raise
 
     @retry_decorator
-    async def get_metadata(self, path: str, netloc: str) -> FileMetadata | None:
+    async def get_metadata(self, url: ParseResult) -> FileMetadata | None:
         """
-        Retrieve and cache file metadata for a Zenodo record or a data.pypsa.org file.
+        Retrieve and cache file metadata for a Zenodo record, data.pypsa.org file,
+        GCS object, or generic HTTP URL.
 
         Args:
-            path: Server path
-            netloc: Network location (e.g., "zenodo.org")
+            url: Parsed URL
 
         Returns:
-            Dictionary mapping filename to FileMetadata
+            FileMetadata or None if not found
         """
+        netloc = url.netloc
         if netloc in ("zenodo.org", "sandbox.zenodo.org"):
-            return await self.get_zenodo_metadata(path, netloc)
+            return await self.get_zenodo_metadata(url)
         elif netloc == "data.pypsa.org":
-            return await self.get_pypsa_metadata(path, netloc)
+            return await self.get_pypsa_metadata(url)
         elif netloc == "storage.googleapis.com":
-            return await self.get_gcs_metadata(path, netloc)
+            return await self.get_gcs_metadata(url)
 
-        raise WorkflowError(
-            "Cached-http storage plugin is only implemented for zenodo.org, data.pypsa.org, and storage.googleapis.com urls"
-        )
+        return await self.get_http_metadata(url)
 
     @staticmethod
-    def is_immutable(netloc: str):
-        if netloc in ("zenodo.org", "sandbox.zenodo.org"):
-            return True
-        elif netloc == "data.pypsa.org":
-            return True
-        elif netloc == "storage.googleapis.com":
-            return False
+    def is_immutable(url: ParseResult) -> bool:
+        return url.netloc in ("zenodo.org", "sandbox.zenodo.org", "data.pypsa.org")
 
-        raise WorkflowError(
-            "Cached-http storage plugin is only implemented for zenodo.org, data.pypsa.org, and storage.googleapis.com urls"
-        )
+    async def get_http_metadata(self, parsed: ParseResult) -> FileMetadata | None:
+        """
+        Retrieve file metadata for a generic HTTP URL via HEAD request.
 
-    async def get_zenodo_metadata(self, path: str, netloc: str) -> FileMetadata | None:
+        Args:
+            url: Parsed URL
+
+        Returns:
+            FileMetadata with size and mtime from HTTP headers, or None if not found
+        """
+        url = parsed.geturl()
+
+        async with self.client() as client:
+            try:
+                response = await client.head(url)
+            except Exception as e:
+                logger.warning(f"{type(e).__name__} while head'ing {url}")
+                raise
+
+        if response.status_code == 404:
+            return None
+        if response.status_code == 405:
+            # HEAD not supported; assume file exists with unknown size/mtime
+            return FileMetadata(checksum=None, size=0, mtime=0.0)
+        if response.status_code != 200:
+            raise WorkflowError(
+                f"Failed to fetch HTTP metadata: HTTP {response.status_code} ({url})"
+            )
+
+        size = int(response.headers.get("content-length", 0))
+
+        last_modified = response.headers.get("last-modified")
+        if last_modified:
+            try:
+                mtime = cast(datetime, parsedate_to_datetime(last_modified)).timestamp()
+            except Exception:
+                logger.debug(
+                    f"HTTP last-modified not in RFC2822 format: `{last_modified}`"
+                )
+                mtime = 0.0
+        else:
+            mtime = 0.0
+
+        return FileMetadata(checksum=None, size=size, mtime=mtime)
+
+    async def get_zenodo_metadata(self, url: ParseResult) -> FileMetadata | None:
         """
         Retrieve and cache file metadata for a Zenodo record or a data.pypsa.org file.
 
         Args:
-            path: Server path
-            netloc: Network location (e.g., "zenodo.org")
+            url: Parsed URL
 
         Returns:
             Dictionary mapping filename to FileMetadata
         """
+        netloc = url.netloc
+        path = url.path.strip("/")
 
         # Zenodo record
         _records, record_id, _files, filename = path.split("/", maxsplit=3)
 
         if _records != "records" or _files != "files":
             raise WorkflowError(
-                f"Invalid Zenodo URL format: http(s)://{netloc}/{path}. "
+                f"Invalid Zenodo URL format: {url.geturl()}. "
                 f"Expected format: https://zenodo.org/records/{{record_id}}/files/{{filename}}"
             )
 
@@ -374,30 +417,30 @@ class StorageProvider(StorageProviderBase):
 
         return metadata.get(filename)
 
-    async def get_pypsa_metadata(self, path: str, netloc: str) -> FileMetadata | None:
+    async def get_pypsa_metadata(self, url: ParseResult) -> FileMetadata | None:
         """
         Retrieve and cache file metadata from data.pypsa.org manifest.
 
         Args:
-            path: Server path
-            netloc: Network location (e.g., "data.pypsa.org")
+            url: Parsed URL
 
         Returns:
             FileMetadata for the requested file, or None if not found
         """
-
         # Check cache first
-        base_path = dirname(path)
+        path = url.path.strip("/")
+
+        base_path: str = dirname(path)
         while base_path:
             if base_path in self._pypsa_manifest_cache:
-                filename = relpath(path, base_path)
+                filename: str = relpath(path, base_path)
                 return self._pypsa_manifest_cache[base_path].get(filename)
             base_path = dirname(base_path)
 
         # Fetch manifest
         base_path = dirname(path)
         while base_path:
-            manifest_url = f"https://{netloc}/{base_path}/manifest.yaml"
+            manifest_url = url._replace(path=f"/{base_path}/manifest.yaml").geturl()
 
             async with self.httpr("get", manifest_url) as response:
                 if response.status_code == 200:
@@ -408,7 +451,7 @@ class StorageProvider(StorageProviderBase):
             base_path = dirname(base_path)
         else:
             raise WorkflowError(
-                f"Failed to fetch data.pypsa.org manifest for https://{netloc}/{path}"
+                f"Failed to fetch data.pypsa.org manifest for {url.geturl()}"
             )
 
         # Parse files array and build metadata dict
@@ -432,7 +475,7 @@ class StorageProvider(StorageProviderBase):
         filename = relpath(path, base_path)
         return metadata.get(filename)
 
-    async def get_gcs_metadata(self, path: str, netloc: str) -> FileMetadata | None:
+    async def get_gcs_metadata(self, url: ParseResult) -> FileMetadata | None:
         """
         Retrieve and cache file metadata from Google Cloud Storage.
 
@@ -441,22 +484,21 @@ class StorageProvider(StorageProviderBase):
         API endpoint: https://storage.googleapis.com/storage/v1/b/{bucket}/o/{encoded-object}
 
         Args:
-            path: Server path (bucket/object-path)
-            netloc: Network location (storage.googleapis.com)
+            url: Parsed URL
 
         Returns:
             FileMetadata for the requested file, or None if not found
         """
         # Check cache first
-        if path in self._gcs_metadata_cache:
-            return self._gcs_metadata_cache[path]
+        if url.path in self._gcs_metadata_cache:
+            return self._gcs_metadata_cache[url.path]
 
         # Parse bucket and object path from the URL path
         # Path format: /{bucket}/{object-path}
-        parts = path.split("/", maxsplit=1)
+        parts = url.path.strip("/").split("/", maxsplit=1)
         if len(parts) < 2:
             raise WorkflowError(
-                f"Invalid GCS URL format: http(s)://{netloc}/{path}. "
+                f"Invalid GCS URL format: {url.geturl()}. "
                 f"Expected format: https://storage.googleapis.com/{{bucket}}/{{object-path}}"
             )
 
@@ -466,7 +508,9 @@ class StorageProvider(StorageProviderBase):
         encoded_object = quote(object_path, safe="")
 
         # GCS JSON API endpoint for object metadata
-        api_url = f"https://{netloc}/storage/v1/b/{bucket}/o/{encoded_object}"
+        api_url = url._replace(
+            path=f"/storage/v1/b/{bucket}/o/{encoded_object}"
+        ).geturl()
 
         async with self.httpr("get", api_url) as response:
             if response.status_code == 404:
@@ -495,7 +539,7 @@ class StorageProvider(StorageProviderBase):
         metadata = FileMetadata(checksum=checksum, size=size, mtime=mtime)
 
         # Store in cache
-        self._gcs_metadata_cache[path] = metadata
+        self._gcs_metadata_cache[url.path] = metadata
 
         return metadata
 
@@ -503,22 +547,16 @@ class StorageProvider(StorageProviderBase):
 # Implementation of storage object
 class StorageObject(StorageObjectRead):
     provider: StorageProvider  # pyright: ignore[reportIncompatibleVariableOverride]
-    netloc: str
-    path: str
+    url: ParseResult
 
     def __post_init__(self):
         super().__post_init__()
-
-        # Parse URL to extract record ID and filename
-        # URL format: https://zenodo.org/records/{record_id}/files/{filename}
-        parsed = urlparse(str(self.query))
-        self.netloc = parsed.netloc
-        self.path = parsed.path.strip("/")
+        self.url = urlparse(str(self.query))
 
     @override
     def local_suffix(self) -> str:
         """Return the local suffix for this object (used by parent class)."""
-        return f"{self.netloc}{self.path}"
+        return f"{self.url.netloc}{self.url.path}"
 
     @override
     def get_inventory_parent(self) -> str | None:
@@ -533,10 +571,10 @@ class StorageObject(StorageObjectRead):
 
         if self.provider.cache:
             cached = self.provider.cache.get(str(self.query))
-            if cached is not None and self.provider.is_immutable(self.netloc):
+            if cached is not None and self.provider.is_immutable(self.url):
                 return True
 
-        metadata = await self.provider.get_metadata(self.path, self.netloc)
+        metadata = await self.provider.get_metadata(self.url)
         return metadata is not None
 
     @override
@@ -544,7 +582,7 @@ class StorageObject(StorageObjectRead):
         if self.provider.settings.skip_remote_checks:
             return 0
 
-        metadata = await self.provider.get_metadata(self.path, self.netloc)
+        metadata = await self.provider.get_metadata(self.url)
         return metadata.mtime if metadata is not None else 0
 
     @override
@@ -554,12 +592,12 @@ class StorageObject(StorageObjectRead):
 
         if self.provider.cache:
             cached = self.provider.cache.get(str(self.query))
-            if cached is not None and self.provider.is_immutable(self.netloc):
+            if cached is not None and self.provider.is_immutable(self.url):
                 return cached.stat().st_size
         else:
             cached = None
 
-        metadata = await self.provider.get_metadata(self.path, self.netloc)
+        metadata = await self.provider.get_metadata(self.url)
         if metadata is None:
             return 0
 
@@ -588,7 +626,7 @@ class StorageObject(StorageObjectRead):
 
         if self.provider.cache:
             cached = self.provider.cache.get(str(self.query))
-            if cached is not None and self.provider.is_immutable(self.netloc):
+            if cached is not None and self.provider.is_immutable(self.url):
                 cache.exists_in_storage[key] = True
                 cache.mtime[key] = Mtime(storage=cached.stat().st_mtime)
                 cache.size[key] = cached.stat().st_size
@@ -596,7 +634,7 @@ class StorageObject(StorageObjectRead):
         else:
             cached = None
 
-        metadata = await self.provider.get_metadata(self.path, self.netloc)
+        metadata = await self.provider.get_metadata(self.url)
         if metadata is None:
             cache.exists_in_storage[key] = False
             cache.mtime[key] = Mtime(storage=0)
@@ -643,7 +681,7 @@ class StorageObject(StorageObjectRead):
             WrongChecksum
         """
         # Get cached or fetch record metadata
-        metadata = await self.provider.get_metadata(self.path, self.netloc)
+        metadata = await self.provider.get_metadata(self.url)
         if metadata is None:
             raise WorkflowError(f"No metadata found for {self.query}")
 
@@ -671,17 +709,17 @@ class StorageObject(StorageObjectRead):
         local_path.parent.mkdir(parents=True, exist_ok=True)
 
         query = str(self.query)
-        filename = basename(self.path)
+        filename = basename(self.url.path)
 
-        metadata = await self.provider.get_metadata(self.path, self.netloc)
+        metadata = await self.provider.get_metadata(self.url)
         if metadata is not None and metadata.redirect is not None:
-            query = f"https://{self.netloc}/{metadata.redirect}"
+            query = self.url._replace(path=f"/{metadata.redirect}").geturl()
 
         # If already in cache, check if still valid
         if self.provider.cache:
             cached = self.provider.cache.get(query)
             if cached is not None:
-                if self.provider.is_immutable(self.netloc) or (
+                if self.provider.is_immutable(self.url) or (
                     metadata is not None and cached.stat().st_mtime >= metadata.mtime
                 ):
                     logger.info(f"Retrieved {filename} from cache ({query})")
