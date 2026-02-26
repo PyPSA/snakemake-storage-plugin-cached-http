@@ -37,6 +37,7 @@ from snakemake_interface_storage_plugins.storage_provider import (
 from tqdm_loggable.auto import tqdm
 from typing_extensions import override
 
+from . import monkeypatch  # noqa: F401
 from .cache import Cache
 
 logger = get_logger()
