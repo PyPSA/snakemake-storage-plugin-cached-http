@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 from unittest.mock import MagicMock
 from urllib.parse import urlparse
 
+import httpx
 import pytest
 
 from snakemake_storage_plugin_cached_http import (
@@ -376,7 +377,7 @@ def make_mock_httpr(content: bytes, fail_at: int | None):
                 yield chunk
             else:
                 yield chunk[:drop_at]
-                raise ConnectionError("peer closed connection")
+                raise httpx.ReadError("peer closed connection")
 
         response.aiter_bytes = aiter_bytes
         response.headers = {"content-length": str(len(chunk))}
