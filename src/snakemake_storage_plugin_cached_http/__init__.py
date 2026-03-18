@@ -118,10 +118,8 @@ class WrongChecksum(Exception):
 retry_decorator = retry(
     exceptions=(  # pyright: ignore[reportArgumentType]
         httpx.HTTPError,
-        TimeoutError,
         OSError,
         WrongChecksum,
-        WorkflowError,
     ),
     tries=5,
     delay=3,
@@ -264,7 +262,7 @@ class StorageProvider(StorageProviderBase):
         return wait_seconds
 
     @asynccontextmanager
-    async def httpr(self, method: str, url: str, headers: dict | None = None):
+    async def httpr(self, method: str, url: str, headers: dict[str, str] | None = None):
         """
         HTTP request wrapper with rate limiting and exception logging.
 
@@ -344,10 +342,7 @@ class StorageProvider(StorageProviderBase):
         if response.status_code == 405:
             # HEAD not supported; assume file exists with unknown size/mtime
             return FileMetadata(checksum=None, size=0, mtime=0.0)
-        if response.status_code != 200:
-            raise WorkflowError(
-                f"Failed to fetch HTTP metadata: HTTP {response.status_code} ({url})"
-            )
+        response.raise_for_status()
 
         size = int(response.headers.get("content-length", 0))
 
@@ -395,10 +390,7 @@ class StorageProvider(StorageProviderBase):
         api_url = f"https://{netloc}/api/records/{record_id}"
 
         async with self.httpr("get", api_url) as response:
-            if response.status_code != 200:
-                raise WorkflowError(
-                    f"Failed to fetch Zenodo record metadata: HTTP {response.status_code} ({api_url})"
-                )
+            response.raise_for_status()
 
             # Read the full response body
             content = await response.aread()
@@ -520,10 +512,7 @@ class StorageProvider(StorageProviderBase):
         async with self.httpr("get", api_url) as response:
             if response.status_code == 404:
                 return None
-            if response.status_code != 200:
-                raise WorkflowError(
-                    f"Failed to fetch GCS object metadata: HTTP {response.status_code} ({api_url})"
-                )
+            response.raise_for_status()
 
             content = await response.aread()
             data = json.loads(content)
@@ -748,8 +737,9 @@ class StorageObject(StorageObjectRead):
                     mode = "wb"
                     offset = 0
                 else:
-                    raise WorkflowError(
-                        f"Failed to download: HTTP {response.status_code} ({query})"
+                    response.raise_for_status()
+                    raise AssertionError(
+                        f"Unhandled status code: {response.status_code}"
                     )
 
                 total_size = int(response.headers.get("content-length", 0)) + offset
@@ -775,11 +765,11 @@ class StorageObject(StorageObjectRead):
             if self.provider.cache:
                 self.provider.cache.put(query, local_path)
 
-        except (TimeoutError, ConnectionError, httpx.TransportError):
+        except httpx.TransportError:
             # Mid-transfer interruption - keep partial file for resume on next retry
             raise
-        except:
-            # Any other error (wrong checksum, HTTP error, unexpected) - delete and restart
+        except:  # noqa: E722
+            # Any other error (wrong checksum, HTTP error, KeyboardInterrupt) - delete and maybe restart
             if local_path.exists():
                 local_path.unlink()
             raise
