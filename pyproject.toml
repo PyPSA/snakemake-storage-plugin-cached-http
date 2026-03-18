@@ -17,10 +17,9 @@ dependencies = [
     "httpx ~= 0.27",
     "platformdirs ~= 4.0",
     "reretry ~= 0.11",
-    "snakemake-interface-common ~= 1.14",
+    "snakemake-interface-common >=1.14,<2.0",
     "snakemake-interface-storage-plugins >=4.2,<5.0",
-    "snakemake-storage-plugin-http ~= 0.3",
-    "tqdm-loggable ~= 0.2",
+    "tqdm-loggable ~= 0.3",
     "typing-extensions ~= 4.15",
     "zstandard ~=0.25.0",
 ]

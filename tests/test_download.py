@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import time
+from urllib.parse import urlparse
 
 import pytest
 
@@ -23,24 +24,27 @@ from tests.conftest import assert_no_http_requests
 TEST_CONFIGS = {
     "zenodo": {
         "url": "https://zenodo.org/records/16810901/files/attributed_ports.json",
-        "path": "records/16810901/files/attributed_ports.json",
-        "netloc": "zenodo.org",
         "has_size": True,
-        "has_mtime": False,  # Zenodo records are immutable
+        "is_immutable": True,
+        "has_checksum": True,
     },
     "pypsa": {
         "url": "https://data.pypsa.org/workflows/eur/attributed_ports/2020-07-10/attributed_ports.json",
-        "path": "workflows/eur/attributed_ports/2020-07-10/attributed_ports.json",
-        "netloc": "data.pypsa.org",
         "has_size": False,  # data.pypsa.org manifests don't include size
-        "has_mtime": False,  # data.pypsa.org files are immutable
+        "is_immutable": True,
+        "has_checksum": True,
     },
     "gcs": {
         "url": "https://storage.googleapis.com/open-tyndp-data-store/cached-http/attributed_ports/archive/2020-07-10/attributed_ports.json",
-        "path": "open-tyndp-data-store/cached-http/attributed_ports/archive/2020-07-10/attributed_ports.json",
-        "netloc": "storage.googleapis.com",
         "has_size": True,
-        "has_mtime": True,  # GCS provides modification timestamps
+        "is_immutable": False,  # GCS provides modification timestamps
+        "has_checksum": True,
+    },
+    "http": {
+        "url": "https://datacatalogfiles.worldbank.org/ddh-published/0038118/1/DR0046414/attributed_ports.geojson",
+        "has_size": True,
+        "is_immutable": False,
+        "has_checksum": False,  # Generic HTTP has no checksum
     },
 }
 
@@ -65,22 +69,20 @@ def storage_provider(tmp_path, test_logger):
         max_concurrent_downloads=3,
     )
 
-    provider = StorageProvider(
+    return StorageProvider(
         local_prefix=local_prefix,
         logger=test_logger,
         settings=settings,
     )
 
-    return provider
 
-
-@pytest.fixture(params=["zenodo", "pypsa", "gcs"])
+@pytest.fixture(params=list(TEST_CONFIGS))
 def test_config(request):
-    """Provide test configuration (parametrized for zenodo, pypsa, and gcs)."""
+    """Provide test configuration (parametrized for all backends)."""
     return TEST_CONFIGS[request.param]
 
 
-@pytest.fixture(params=[k for k, v in TEST_CONFIGS.items() if v["has_mtime"]])
+@pytest.fixture(params=[k for k, v in TEST_CONFIGS.items() if not v["is_immutable"]])
 def mutable_test_config(request):
     """Provide test configuration for mutable sources only (those with mtime support)."""
     return TEST_CONFIGS[request.param]
@@ -88,7 +90,7 @@ def mutable_test_config(request):
 
 @pytest.fixture
 def storage_object(test_config, storage_provider):
-    """Create a StorageObject for the test file (parametrized for zenodo and pypsa)."""
+    """Create a StorageObject for the test file (parametrized for all backends)."""
     obj = StorageObject(
         query=test_config["url"],
         keep_local=False,
@@ -101,13 +103,12 @@ def storage_object(test_config, storage_provider):
 @pytest.mark.asyncio
 async def test_metadata_fetch(storage_provider, test_config):
     """Test that we can fetch metadata from the API/manifest."""
-    metadata = await storage_provider.get_metadata(
-        test_config["path"], test_config["netloc"]
-    )
+    metadata = await storage_provider.get_metadata(urlparse(test_config["url"]))
 
     assert metadata is not None
-    assert metadata.checksum is not None
-    assert metadata.checksum.startswith("md5:")
+    if test_config["has_checksum"]:
+        assert metadata.checksum is not None
+        assert metadata.checksum.startswith("md5:")
     if test_config["has_size"]:
         assert metadata.size > 0
 
@@ -136,10 +137,10 @@ async def test_storage_object_size(storage_object, test_config):
 async def test_storage_object_mtime(storage_object, test_config):
     """Test that mtime is 0 for immutable URLs, non-zero for mutable sources."""
     mtime = await storage_object.managed_mtime()
-    if test_config["has_mtime"]:
-        assert mtime > 0
-    else:
+    if test_config["is_immutable"]:
         assert mtime == 0
+    else:
+        assert mtime > 0
 
 
 @pytest.mark.asyncio
@@ -158,10 +159,11 @@ async def test_download_and_checksum(storage_object, tmp_path):
     assert local_path.exists()
     assert local_path.stat().st_size > 0
 
-    # Verify it's valid JSON
+    # Verify it's valid JSON (raw_decode ignores trailing garbage that the worldbank server appends)
     with open(local_path, encoding="utf-8", errors="replace") as f:
-        data = json.load(f)
-        assert isinstance(data, (dict, list))
+        content = f.read()
+    data, _ = json.JSONDecoder().raw_decode(content)
+    assert isinstance(data, (dict, list))
 
     # Verify checksum (should not raise WrongChecksum exception)
     await storage_object.verify_checksum(local_path)
@@ -245,14 +247,15 @@ async def test_skip_remote_checks(test_config, tmp_path, test_logger):
 
 
 @pytest.mark.asyncio
-async def test_wrong_checksum_detection(storage_object, tmp_path):
+async def test_wrong_checksum_detection(storage_object, test_config, tmp_path):
     """Test that corrupted files are detected via checksum."""
-    # Create a corrupted file
     corrupted_path = tmp_path / "corrupted.json"
     corrupted_path.write_text('{"corrupted": "data"}')
 
-    # Verify checksum should raise WrongChecksum
-    with pytest.raises(WrongChecksum):
+    if test_config["has_checksum"]:
+        with pytest.raises(WrongChecksum):
+            await storage_object.verify_checksum(corrupted_path)
+    else:
         await storage_object.verify_checksum(corrupted_path)
 
 

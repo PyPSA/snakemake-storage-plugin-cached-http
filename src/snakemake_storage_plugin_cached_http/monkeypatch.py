@@ -3,43 +3,38 @@
 # SPDX-License-Identifier: MIT
 
 """
-Monkey-patch the HTTP storage plugin to avoid conflicts with Zenodo URLs.
+Warn if snakemake-storage-plugin-http is installed and patch it to refuse all URLs.
 
-This module patches snakemake-storage-plugin-http to refuse zenodo.org URLs,
-ensuring they are handled exclusively by the cached-http plugin.
+Since cached-http now accepts all HTTP(S) URLs, having snakemake-storage-plugin-http
+installed at the same time causes Snakemake to raise "Multiple suitable storage
+providers found". This module detects that situation, warns the user, and patches the
+HTTP plugin to refuse every URL so that cached-http wins unconditionally.
 """
 
-from urllib.parse import urlparse
+import warnings
 
-import snakemake_storage_plugin_http as http_base
 from snakemake_interface_storage_plugins.storage_provider import (
     StorageQueryValidationResult,
 )
 
+try:
+    import snakemake_storage_plugin_http
 
-def is_pypsa_or_zenodo_url(url: str) -> bool:
-    parsed = urlparse(url)
-    return parsed.netloc in (
-        "zenodo.org",
-        "sandbox.zenodo.org",
-        "data.pypsa.org",
-        "storage.googleapis.com",
-    ) and parsed.scheme in (
-        "http",
-        "https",
+    warnings.warn(
+        "snakemake-storage-plugin-http is installed alongside "
+        "snakemake-storage-plugin-cached-http. Because cached-http from v0.5 handles "
+        "all HTTP(S) URLs, the http plugin has been disabled for this session. "
+        "Please uninstall snakemake-storage-plugin-http. "
+        "This compatibility shim will be removed in v0.6.",
+        FutureWarning,
     )
 
-
-# Patch the original HTTP StorageProvider to refuse zenodo URLs
-orig_valid_query = http_base.StorageProvider.is_valid_query
-http_base.StorageProvider.is_valid_query = classmethod(
-    lambda c, q: (
-        StorageQueryValidationResult(
+    snakemake_storage_plugin_http.StorageProvider.is_valid_query = classmethod(
+        lambda c, q: StorageQueryValidationResult(
             query=q,
             valid=False,
-            reason="Deactivated in favour of cached_http",
+            reason="Disabled: snakemake-storage-plugin-cached-http handles all HTTP(S) URLs",
         )
-        if is_pypsa_or_zenodo_url(q)
-        else orig_valid_query(q)
     )
-)
+except ImportError:
+    pass
